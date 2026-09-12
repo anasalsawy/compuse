@@ -1,600 +1,494 @@
 # Implementation Plan: Windows Dual-Lobe Computer-Use Agent
 
-## Task Summary
-
-Build a Windows desktop computer-use agent with:
-
-1. **Electron and React desktop UI**
-2. **Windows-native computer control**
-   - Windows UI Automation
-   - Screenshot capture
-   - Mouse and keyboard input
-   - Application launch and window focus
-   - Browser automation
-3. **Real-time voice interaction**
-   - Streaming speech-to-text
-   - Streaming text-to-speech
-   - Barge-in and interruption
-   - Voice confirmations
-4. **Dual-lobe execution**
-   - Strategist lobe for planning, risk analysis, authorization, verification, and memory
-   - Executor lobe for desktop actions and other side effects
-5. **Safety and reliability controls**
-   - Planning, action, verification, and escalation locks
-   - Typed inter-lobe messages
-   - Action permits
-   - Append-only event ledger
-   - Durable checkpoints
-   - Independent evidence verification
-   - Watchdog and recovery
-   - Human confirmation for consequential actions
-6. **Provider and persistence infrastructure**
-   - Separate model routes for Strategist, Executor, and Verifier
-   - OpenAI-compatible gateway patterns
-   - Local-first persistence with optional Postgres
-   - Evidence and artifact storage
-   - Per-device desktop-session serialization
-
-The implementation must not be a simple second LLM call around the existing NeuralAgent loop. NeuralAgent currently uses a sequential polling loop, while the dual-lobe design requires explicit role separation, permission gates, verification, durable state, and bounded overlap between reasoning and execution.
-
-The practical target is:
-
-> Eliminate unnecessary idle time by allowing the Strategist to prepare safe follow-up work while the Executor performs an already-authorized action, without allowing stale or unverified state to authorize a new side effect.
-
-A literally zero-latency “no thinking gap” is not achievable when new screenshots, model responses, verification, or human confirmation are required. The implementation should optimize for **no unnecessary idle gap** while preserving correctness and safety.
+**Status:** Authoritative replacement for the previous `plan.md`  
+**Target repository:** `anasalsawy/compuse`  
+**Reference repositories:** `skyiron/neuralagentAI`, `anasalsawy/dual-lobe`, `anasalsawy/dual-lobe-proxy`  
+**Research date:** 2026-09-12  
+**Primary platform:** Windows 11, same-integrity desktop applications  
+**Initial execution model:** Local-first, single physical desktop session, one mutating action in flight  
+**Security posture:** Human-controlled, permit-bound, evidence-verified automation; no arbitrary shell execution
 
 ---
 
-## Key Findings
+## 1. Product contract
 
-### 1. Existing repositories provide complementary foundations
+The first releasable version will provide:
 
-#### NeuralAgent provides
+> A Windows desktop agent that inspects supported native applications and isolated browser sessions using Windows UI Automation, Playwright/CDP, screenshots, and keyboard/mouse fallback. A Strategist prepares and reviews work, an Executor performs only permitted actions, and a Verifier confirms the resulting real-world state. Every mutation is journaled, cancellable, bound to a current observation, and verified against independent evidence. Consequential operations require exact human confirmation.
 
-- Electron desktop shell
-- React interface
-- FastAPI backend
-- Python desktop automation daemon
-- Screenshot-based control
-- PyAutoGUI input
-- Windows application launch and focus
-- Windows UI Automation extraction
-- Browser/background automation
-- Task, plan, and subtask lifecycle
-- Multiple LLM provider configuration
+The product will **not** promise:
 
-Important existing paths include:
+- universal support for all Windows applications;
+- reliable control of elevated applications without a separately signed UIAccess component;
+- automation of UAC, Windows Hello, logon, or secure-desktop surfaces;
+- autonomous password or MFA handling;
+- automatic rollback for irreversible actions;
+- zero-latency execution;
+- complete protection against sensitive information appearing on-screen;
+- retrying an uncertain external side effect after a crash;
+- prompt-injection immunity;
+- measured reliability improvements before the benchmark suite passes.
 
-```text
-desktop/main.js
-desktop/electron/preload.js
-desktop/neuralagent-app/src/
-desktop/aiagent/main.py
-desktop/aiagent/ui_extraction.py
-backend/main.py
-backend/routers/aiagent/
-backend/schemas/aiagent.py
-backend/utils/llm_provider.py
-backend/utils/procedures.py
-```
+---
 
-#### dual-lobe provides
+## 2. Verified constraints and decisions
 
-- Strategist/Executor separation
-- Exclusive tool ownership
-- Planning lock
-- Action lock
-- Verification lock
-- Escalation lock
-- Typed protocol envelopes
-- Append-only event ledger
-- Durable checkpoints
-- Evidence and claim model
-- Watchdog signals
-- Recovery and escalation concepts
+### 2.1 Existing repositories
 
-Important specification files include:
+`NeuralAgent` is a useful Electron/React/FastAPI/Python product shell, but its current execution core is not safe enough to become the authority. Verified limitations include:
 
-```text
-SPEC.md
-EXPERIMENTS.md
-docs/production-architecture-and-platform-integration.md
-docs/runtime-and-oversight-reference.md
-```
+- fixed `1280 × 720` screenshot scaling;
+- one global coordinate transform;
+- no persisted monitor origin or DPI metadata;
+- shell-string application launching;
+- title-substring window matching;
+- sequential execution/polling;
+- no durable action permits;
+- no authoritative post-action verification;
+- no device-level desktop-session lock;
+- no durable action journal.
 
-#### dual-lobe-proxy provides
+`dual-lobe` supplies the architectural concepts:
 
-- OpenAI-compatible gateway
-- Provider registry
-- Run identity
-- Streaming response patterns
-- Correlation headers
-- Persistent Postgres models
-- Background B-lobe worker
-- Outbox/job queue
-- Shared memory
-- Director mode
-- Evidence and claim structures
-- Per-run serialization
-- Telemetry
+- Strategist/Executor separation;
+- planning, action, verification, and escalation locks;
+- typed messages;
+- append-only ledger;
+- checkpoints;
+- watchdogs;
+- recovery.
 
-Important implementation areas include:
-
-```text
-src/dual_lobe/api/
-src/dual_lobe/b/
-src/dual_lobe/core/
-src/dual_lobe/director/
-src/dual_lobe/evidence/
-src/dual_lobe/provider/
-src/dual_lobe/state/
-```
-
-### 2. NeuralAgent’s current execution loop is sequential
-
-The current Python loop follows this pattern:
-
-```python
-while True:
-    current_subtask_response = get_current_subtask()
-    action_response = get_next_step()
-    perform_action(action_response)
-```
-
-Consequences:
-
-- The model is idle while desktop actions execute.
-- The desktop agent is idle while the model generates.
-- There is no Strategist/Executor overlap.
-- There is no action permit lifecycle.
-- There is no independent verification gate.
-- There is no durable local action ledger.
-- There is no device-level desktop lock.
-- There is no explicit watchdog or recovery state machine.
-
-Replace this polling model with a local event-driven runtime using a typed protocol over local IPC. The research identified named pipes, local WebSocket, gRPC, stdio, and equivalent local sockets as viable communication patterns; the exact transport remains an implementation choice.
-
-### 3. Tool ownership must be enforced in code
-
-The Strategist and Executor must not share unrestricted access to side-effecting tools.
-
-#### Strategist-owned capabilities
-
-Examples:
-
-```text
-task_decomposition
-web_research
-memory_search
-risk_classifier
-policy_checker
-source_verifier
-plan_critic
-artifact_validator
-test_runner
-stall_detector
-memory_curator
-approval_gate
-state_verifier
-```
-
-#### Executor-owned capabilities
-
-Examples:
-
-```text
-click
-double_click
-drag
-type
-keypress
-launch_application
-focus_window
-browser_action
-file_write
-file_edit
-send_message
-submit_form
-delete
-purchase
-deploy
-```
-
-#### Shared observation substrate
-
-Both lobes may receive controlled observations such as:
-
-```text
-screenshot
-UI Automation tree
-foreground window
-process state
-clipboard metadata
-browser state
-tool result
-```
-
-Shared observations must go through the observation layer. They must not create a hidden route around the Tool Router or permit system.
-
-### 4. The current dual-lobe-proxy normal mode is not sufficient
-
-The proxy’s normal mode follows:
+`dual-lobe-proxy` supplies gateway and persistence patterns, but its normal mode is advisory:
 
 ```text
 A responds
-B reviews in the background
+B reviews afterward
 ```
 
-This is useful for advisory observation, but it cannot prevent an action already delivered to the desktop.
+That mode cannot prevent an action already delivered to the desktop. Its documented implementation is also text-only and does not execute tools or inspect files. Computer-use mode will therefore be implemented as a new coordinator/runtime, not as a configuration change to normal proxy mode.
 
-Computer-use mode must instead implement:
+### 2.2 Core architecture decisions
 
-```text
-Strategist proposes or reviews
-Strategist permits
-Executor executes
-Executor captures evidence
-Strategist verifies
-Run advances
-```
-
-The existing proxy’s Director mode is closer to the desired behavior, but it currently handles text and generic tool calls rather than Windows UI state, screenshots, permits, or execution evidence.
-
-### 5. Computer-use support must become multimodal
-
-The proxy currently rejects image and audio input:
-
-```python
-if isinstance(content, list) and any(
-    not isinstance(part, dict) or part.get("type") != "text"
-    for part in content
-):
-    raise HTTPException(status_code=400, detail="image/audio input is disabled; text only")
-```
-
-Do not merely remove this rejection. Add controlled support for:
-
-- Screenshot artifacts
-- PNG/JPEG payloads
-- UI Automation JSON
-- Window/process metadata
-- Tool-result JSON
-- Artifact references
-- Hashes
-- Redaction
-- Payload and dimension limits
-- Provider capability validation
-
-### 6. Windows UI Automation should be the primary control path
-
-NeuralAgent currently extracts control types and bounds using:
-
-```python
-import uiautomation as auto
-foreground = auto.GetForegroundControl()
-```
-
-Supported control types include:
-
-```text
-ButtonControl
-EditControl
-CheckBoxControl
-ComboBoxControl
-HyperlinkControl
-TabItemControl
-MenuItemControl
-```
-
-Microsoft UI Automation also exposes semantic control patterns:
-
-```text
-Invoke
-Value
-Text
-Selection
-ExpandCollapse
-Scroll
-Window
-Transform
-```
-
-Prefer semantic actions such as:
-
-```text
-uia.invoke
-uia.set_value
-uia.select
-uia.expand
-uia.collapse
-uia.scroll
-uia.focus
-uia.close
-```
-
-Use coordinate actions only as fallback for custom-rendered or inaccessible surfaces.
-
-### 7. Screenshot coordinates currently use a fixed model canvas
-
-NeuralAgent assumes:
-
-```python
-TARGET_W = 1280
-TARGET_H = 720
-```
-
-and scales model coordinates to the physical screen.
-
-This must be replaced or extended with explicit display metadata because the current approach does not explicitly handle:
-
-- Multiple monitors
-- Negative virtual-desktop coordinates
-- Per-monitor DPI
-- Different monitor scale factors
-- Window coordinates versus virtual-desktop coordinates
-- Screenshot-to-input transformation consistency
-
-The implementation must preserve the mapping metadata with every observation and action.
-
-### 8. Verification must inspect the real environment
-
-The system must not mark an action successful merely because an input event was dispatched.
-
-Verification evidence may include:
-
-```text
-post-action screenshot
-UI Automation property/value
-window title
-foreground process
-browser DOM state
-clipboard content
-application notification
-download file hash
-test result
-API response
-```
-
-Every mutating action requires:
-
-```text
-pre-observation
-action event
-post-observation
-verification result
-```
-
-### 9. Voice APIs have different deployment characteristics
-
-The findings identify:
-
-- Windows on-device Speech Recognition for low-latency, potentially offline speech recognition, with documented Windows 11 24H2 and Windows App SDK requirements for the referenced API.
-- Azure Speech SDK for streaming recognition and synthesis, including audio streams, synthesis events, and streaming output.
-
-The voice layer must therefore support a local path, cloud fallback, or both. The exact API choice and supported Windows-version policy remain open.
-
-### 10. External screen content is untrusted
-
-Web pages, documents, emails, notifications, and screenshots may contain prompt-injection text.
-
-The system must maintain separate data categories:
-
-```text
-user_intent
-system_policy
-strategist_instruction
-executor_instruction
-environment_content
-```
-
-Environment content may inform decisions but must not grant permissions or override policy.
-
-### 11. Consequential operations require confirmation
-
-The system should require human confirmation by default for:
-
-```text
-send
-submit
-purchase
-pay
-delete
-publish
-deploy
-upload
-share
-accept terms
-close unsaved work
-```
-
-Confirmation must be bound to the exact action, target, relevant content or argument hash, run ID, and expiration time.
+| Area | Decision |
+|---|---|
+| Desktop authority | One local Coordinator process owns permits, state transitions, ledger writes, and desktop-session locking |
+| Strategist | Plans, classifies risk, prepares permits, chooses verification, and proposes recovery |
+| Executor | Owns desktop side effects only; cannot grant permits or verify itself |
+| Verifier | Prefer deterministic evidence; use a separate model only when needed |
+| Physical desktop | One mutating action in flight per desktop session |
+| Overlap | Strategist computation may overlap an already-permitted Executor action; no speculative action may use unverified post-action state |
+| Persistence | SQLite, one authoritative writer, WAL mode, `synchronous=FULL` for safety-critical records |
+| Browser | Playwright persistent contexts; CDP only for explicit Chromium/WebView2 attach |
+| UI automation | UIA semantic operations first; coordinates only as fallback |
+| Voice MVP | Push-to-talk, streaming STT, streamed TTS, emergency local stop |
+| Elevated UI | Pause and escalate; do not bypass UIPI/UAC |
+| Shell execution | Disabled |
+| Remote model input | Artifacts by reference, with hashes, limits, and redaction status |
 
 ---
 
-## Step-by-Step Build Plan
-
-## Phase 0: Establish a tested baseline
-
-### Step 0.1: Create a disposable Windows test environment
-
-Use a disposable Windows profile, VM, or otherwise isolated environment for initial testing. The external computer-use guidance recommends isolated environments and minimal privileges.
-
-Do not begin with:
-
-- Production credentials
-- Financial accounts
-- Personal mailboxes
-- Unrestricted file access
-- Broad network access
-- Arbitrary shell access
-
-### Step 0.2: Run and document the existing NeuralAgent flow
-
-Before modifying the runtime, execute representative tasks and record:
+## 3. Target runtime topology
 
 ```text
-task input
-current subtask responses
-model action responses
+┌─────────────────────────────────────────────────────────────────┐
+│ Electron Renderer                                                │
+│ React task UI, evidence, confirmation, live state                │
+└──────────────────────────────┬──────────────────────────────────┘
+                               │ narrow contextBridge API
+┌──────────────────────────────▼──────────────────────────────────┐
+│ Electron Main Process                                            │
+│ IPC validation, confirmation broker, runtime process lifecycle   │
+└──────────────────────────────┬──────────────────────────────────┘
+                               │ authenticated local IPC
+┌──────────────────────────────▼──────────────────────────────────┐
+│ Python Coordinator                                               │
+│                                                                 │
+│  ┌────────────┐  ┌────────────┐  ┌────────────┐                │
+│  │ Strategist │  │ Executor   │  │ Verifier   │                │
+│  │ client     │  │ adapter    │  │ adapters   │                │
+│  └─────┬──────┘  └─────┬──────┘  └─────┬──────┘                │
+│        │                │                │                       │
+│  ┌─────▼────────────────▼────────────────▼──────┐                │
+│  │ State machine, permits, scheduler, watchdog  │                │
+│  └─────┬─────────────────────────────────────────┘                │
+│        │                                                          │
+│  ┌─────▼──────────┐  ┌──────────────┐  ┌──────────────┐          │
+│  │ SQLite ledger  │  │ Artifact     │  │ Desktop      │          │
+│  │ single writer  │  │ store        │  │ session lock │          │
+│  └────────────────┘  └──────────────┘  └──────────────┘          │
+└──────────────────────────────┬──────────────────────────────────┘
+                               │ optional future sidecar
+                 ┌─────────────▼─────────────┐
+                 │ .NET FlaUI sidecar        │
+                 │ only if Python UIA proves │
+                 │ insufficient              │
+                 └───────────────────────────┘
+```
+
+### 3.1 Local IPC choice
+
+For the first implementation:
+
+```text
+Electron main ↔ Python Coordinator:
+    authenticated loopback HTTP/WebSocket
+
+Coordinator ↔ Executor:
+    in-process Python call
+```
+
+Do not introduce a second process until the state machine works.
+
+For a future FlaUI sidecar:
+
+```text
+Coordinator ↔ FlaUI:
+    named pipe or localhost gRPC authenticated with a per-launch secret
+```
+
+Named pipes are preferred for the sidecar because Windows ACLs can restrict access. If loopback TCP is used, require a random per-launch bearer token, origin validation, and process-lifecycle binding.
+
+---
+
+## 4. Repository structure
+
+Create the following structure, adapting existing NeuralAgent paths only where reuse is demonstrably safe:
+
+```text
+compuse/
+├── desktop/
+│   ├── main/
+│   │   ├── main.ts
+│   │   ├── ipc.ts
+│   │   ├── runtime-client.ts
+│   │   └── confirmation-broker.ts
+│   ├── preload/
+│   │   └── preload.ts
+│   └── renderer/
+│       ├── src/
+│       │   ├── App.tsx
+│       │   ├── components/
+│       │   ├── hooks/
+│       │   ├── store/
+│       │   └── types/
+│       └── index.html
+├── packages/
+│   ├── protocol/
+│   │   ├── envelope.py
+│   │   ├── actions.py
+│   │   ├── observations.py
+│   │   ├── permits.py
+│   │   ├── evidence.py
+│   │   ├── confirmations.py
+│   │   ├── errors.py
+│   │   └── ownership.py
+│   ├── coordinator/
+│   │   ├── runtime.py
+│   │   ├── state_machine.py
+│   │   ├── scheduler.py
+│   │   ├── permit_service.py
+│   │   ├── confirmation_service.py
+│   │   ├── watchdog.py
+│   │   ├── recovery.py
+│   │   └── locks.py
+│   ├── windows_executor/
+│   │   ├── screenshot.py
+│   │   ├── display.py
+│   │   ├── dpi.py
+│   │   ├── ui_automation.py
+│   │   ├── semantic_actions.py
+│   │   ├── input_actions.py
+│   │   ├── window_manager.py
+│   │   ├── process_manager.py
+│   │   ├── clipboard.py
+│   │   ├── cancellation.py
+│   │   ├── browser.py
+│   │   └── journal.py
+│   ├── verifier/
+│   │   ├── deterministic.py
+│   │   ├── uia.py
+│   │   ├── browser.py
+│   │   ├── files.py
+│   │   ├── visual.py
+│   │   └── policy.py
+│   ├── voice/
+│   │   ├── capture.py
+│   │   ├── stt.py
+│   │   ├── tts.py
+│   │   ├── vad.py
+│   │   ├── aec.py
+│   │   ├── barge_in.py
+│   │   └── commands.py
+│   └── storage/
+│       ├── db.py
+│       ├── migrations/
+│       ├── ledger.py
+│       ├── artifacts.py
+│       ├── checkpoints.py
+│       └── retention.py
+├── tests/
+│   ├── protocol/
+│   ├── coordinator/
+│   ├── permits/
+│   ├── recovery/
+│   ├── fake_executor/
+│   ├── fake_provider/
+│   ├── windows/
+│   ├── browser/
+│   ├── voice/
+│   ├── security/
+│   └── benchmark/
+├── installer/
+├── pyproject.toml
+├── package.json
+├── package-lock.json
+├── uv.lock
+└── README.md
+```
+
+---
+
+## 5. Dependency and version policy
+
+Only versions established by the research are fixed here:
+
+- **SQLite:** use version **3.51.3 or later** because SQLite documents a WAL-reset race affecting versions through 3.51.2 in specific concurrent-write/checkpoint conditions.
+- **Windows AI streaming speech API:** treat as experimental and require **Windows 11 24H2** and **Windows App SDK 1.7.1 or later** where that API is used.
+- Other exact dependency versions were not independently established by the research and must not be invented in this plan. Resolve them through a locked dependency review on the build host.
+
+### 5.1 Required dependency selection
+
+The implementation review must pin and record versions for:
+
+```text
+Python
+Electron
+Node.js
+React
+FastAPI
+Pydantic
+SQLAlchemy
+Alembic
+uiautomation
+pywinauto
+mss
+Pillow
+Playwright
+Azure Speech SDK, if enabled
+OpenTelemetry SDK
+pytest
+```
+
+The release build must fail if a dependency is not locked.
+
+### 5.2 Initial setup commands
+
+Use the repository’s approved Python and Node versions after the compatibility review:
+
+```powershell
+git clone <repository-url> compuse
+cd compuse
+
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+
+python -m pip install --upgrade pip
+pip install uv
+uv sync --locked
+
+npm ci
+```
+
+Do not commit generated lockfiles until CI has verified the selected versions on the supported Windows build image.
+
+Install Playwright browser assets only after deciding whether the product bundles or requires an existing Edge/Chromium installation:
+
+```powershell
+python -m playwright install chromium
+```
+
+This command must be part of the installer decision, not run silently on every startup.
+
+---
+
+## 6. Protocol package
+
+All model/provider formats must be converted immediately into provider-independent protocol objects.
+
+### 6.1 Envelope
+
+```python
+# packages/protocol/envelope.py
+from datetime import datetime, timezone
+from enum import Enum
+from pydantic import BaseModel, Field
+
+
+class Actor(str, Enum):
+    USER = "user"
+    COORDINATOR = "coordinator"
+    STRATEGIST = "strategist"
+    EXECUTOR = "executor"
+    VERIFIER = "verifier"
+    ENVIRONMENT = "environment"
+
+
+class MessageType(str, Enum):
+    OBSERVATION = "observation"
+    ACTION_PROPOSAL = "action_proposal"
+    PERMIT = "permit"
+    ACTION_RESULT = "action_result"
+    VERIFICATION_REQUEST = "verification_request"
+    VERIFICATION_RESULT = "verification_result"
+    CONFIRMATION_REQUEST = "confirmation_request"
+    CONFIRMATION_RESULT = "confirmation_result"
+    RECOVERY_REQUEST = "recovery_request"
+    HEARTBEAT = "heartbeat"
+
+
+class Envelope(BaseModel):
+    task_id: str
+    run_id: str
+    seq: int = Field(ge=0)
+    sender: Actor
+    recipient: Actor
+    message_type: MessageType
+    payload: dict
+    environment_revision: int | None = None
+    correlation_id: str
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+```
+
+The coordinator must validate:
+
+- sender/recipient compatibility;
+- monotonic sequence per run;
+- duplicate message idempotency;
+- known message type;
+- run association;
+- environment revision;
+- payload schema.
+
+Unknown messages are rejected and journaled.
+
+### 6.2 Content-origin model
+
+```python
+from enum import Enum
+
+
+class ContentOrigin(str, Enum):
+    USER_INTENT = "user_intent"
+    SYSTEM_POLICY = "system_policy"
+    STRATEGIST_INSTRUCTION = "strategist_instruction"
+    EXECUTOR_INSTRUCTION = "executor_instruction"
+    ENVIRONMENT_CONTENT = "environment_content"
+    PROVIDER_OUTPUT = "provider_output"
+```
+
+Environment content includes:
+
+```text
 screenshots
-UI extraction output
-foreground window
-input events
-final result
-failure behavior
+OCR
+UIA labels
+browser DOM
+documents
+emails
+notifications
+web pages
+clipboard text
 ```
 
-The investigation did not execute the repositories or validate them on Windows, so this baseline is required.
-
-### Step 0.3: Build a failure catalog
-
-At minimum, test:
-
-```text
-application launch
-application readiness
-window focus
-browser navigation
-native button invocation
-text entry
-Unicode text entry
-multi-monitor screenshots
-DPI-scaled displays
-wrong-window focus
-UIA element unavailable
-custom-rendered controls
-application crash
-user cancellation
-UAC prompt
-secure desktop
-network timeout
-model timeout
-```
-
-Record latency and failure modes. Use these results to define the first supported task set.
-
-### Step 0.4: Preserve the existing product shell
-
-Reuse the existing Electron/React shell where practical:
-
-```text
-Electron process
-React renderer
-existing task/thread UI
-existing overlay concepts
-existing Python agent process management
-```
-
-The new runtime should be introduced behind an explicit dual-lobe service boundary rather than mixed into every existing route.
+Environment content may inform a decision but can never issue permission, alter policy, or satisfy human confirmation.
 
 ---
 
-## Phase 1: Define the normalized protocol and domain schemas
+## 7. Action model
 
-Create a provider-independent protocol package. Do not allow Anthropic- or OpenAI-specific action formats to spread throughout the application.
+Use Pydantic discriminated unions. Do not use a generic dictionary for actions.
 
-Suggested package:
+```python
+# packages/protocol/actions.py
+from typing import Annotated, Literal, Union
+from pydantic import BaseModel, Field
 
-```text
-packages/protocol/
+
+class Click(BaseModel):
+    kind: Literal["click"]
+    x: int
+    y: int
+    button: Literal["left", "right", "middle"] = "left"
+    coordinate_space_id: str
+    observation_revision: int
+
+
+class TypeText(BaseModel):
+    kind: Literal["type"]
+    text: str
+    target_ref: str | None = None
+    content_sha256: str
+    observation_revision: int
+
+
+class KeyCombo(BaseModel):
+    kind: Literal["key_combo"]
+    keys: list[str]
+    observation_revision: int
+
+
+class UIAInvoke(BaseModel):
+    kind: Literal["uia.invoke"]
+    element_ref: str
+    required_pattern: Literal[
+        "Invoke", "LegacyIAccessible", "SelectionItem"
+    ]
+    observation_revision: int
+
+
+class UIASetValue(BaseModel):
+    kind: Literal["uia.set_value"]
+    element_ref: str
+    value: str
+    value_sha256: str
+    required_pattern: Literal["Value", "Text"]
+    observation_revision: int
+
+
+class ApplicationLaunch(BaseModel):
+    kind: Literal["application.launch"]
+    target_id: str
+    expected_process_name: str
+    expected_window_title: str | None = None
+
+
+Action = Annotated[
+    Union[
+        Click,
+        TypeText,
+        KeyCombo,
+        UIAInvoke,
+        UIASetValue,
+        ApplicationLaunch,
+    ],
+    Field(discriminator="kind"),
+]
+
+
+class ComputerAction(BaseModel):
+    action_id: str
+    run_id: str
+    action: Action
+    risk_class: Literal["low", "medium", "high"]
+    expected_result: dict
+    required_evidence: list[str]
 ```
 
-or, if extending NeuralAgent:
+### 7.1 Initial action support
 
-```text
-desktop/aiagent/protocol/
-```
-
-### Step 1.1: Define protocol envelope
-
-Use the dual-lobe envelope as the base:
-
-```json
-{
-  "task_id": "string",
-  "run_id": "string",
-  "seq": 42,
-  "from_lobe": "executor",
-  "to_lobe": "strategist",
-  "message_type": "action_result",
-  "payload": {}
-}
-```
-
-Extend it with computer-use metadata:
-
-```json
-{
-  "environment_revision": 81,
-  "screen_hash": "sha256:...",
-  "ui_tree_hash": "sha256:...",
-  "window_handle": "0x123456",
-  "process_id": 1234,
-  "action_id": "action-456",
-  "permit_id": "permit-456",
-  "risk_class": "low",
-  "requires_confirmation": false,
-  "expected_observation": {},
-  "expiration": "2026-09-12T12:00:00Z"
-}
-```
-
-Required validation rules:
-
-- `task_id` and `run_id` must be present.
-- Sequence numbers must be monotonic per run.
-- Sender and recipient must be valid for the message type.
-- Duplicate messages must be handled idempotently.
-- Unknown message types must be rejected.
-- Stale environment revisions must not authorize state-dependent actions.
-- A permit must reference a specific action.
-
-### Step 1.2: Define observation schema
-
-Implement an observation object containing:
-
-```json
-{
-  "run_id": "run-123",
-  "revision": 42,
-  "timestamp": "2026-09-12T12:00:00Z",
-  "foreground_window": {
-    "handle": "0x123",
-    "title": "Notepad",
-    "process_id": 456,
-    "process_name": "notepad.exe"
-  },
-  "screens": [
-    {
-      "monitor_id": "DISPLAY1",
-      "width": 1920,
-      "height": 1080,
-      "image_ref": "artifact://screens/42.png",
-      "sha256": "sha256:..."
-    }
-  ],
-  "ui_elements": [],
-  "clipboard": {
-    "available": false
-  }
-}
-```
-
-Each observation must include:
-
-- Environment revision
-- Timestamp
-- Foreground window identity
-- Process identity
-- Screen artifact reference
-- Screen hash
-- UI tree hash
-- Monitor and coordinate metadata
-- UI elements when available
-
-### Step 1.3: Define normalized computer actions
-
-At minimum support:
+Implement:
 
 ```text
 screenshot
@@ -619,518 +513,173 @@ window.focus
 application.launch
 ```
 
-Represent actions as typed objects. A Python pattern may use Pydantic discriminated unions:
+Do not support arbitrary Python, PowerShell, shell strings, or model-generated executable code.
+
+### 7.2 Permit granularity
+
+Use one permit per mutating action:
+
+| Operation | Permit |
+|---|---|
+| Screenshot/UIA read | observation authorization |
+| Mouse move/hover | low-risk permit |
+| Click | one permit |
+| Type | one permit plus text hash |
+| Key combination | one permit |
+| Drag | one permit |
+| Launch | one permit |
+| Browser navigation | one permit plus URL policy |
+| Submit/send/delete/purchase | one permit plus exact human confirmation |
+
+Provider action batches must be split into individual internal actions. Do not execute an entire provider batch under one broad permit in the MVP.
+
+---
+
+## 8. Observations and environment revisions
 
 ```python
-class ClickAction(BaseModel):
-    kind: Literal["click"]
-    x: int
-    y: int
-    button: Literal["left", "right", "middle"] = "left"
+# packages/protocol/observations.py
+from pydantic import BaseModel
+from datetime import datetime
 
-class UIAInvokeAction(BaseModel):
-    kind: Literal["uia.invoke"]
-    element_id: str
 
-class ComputerAction(BaseModel):
+class WindowIdentity(BaseModel):
+    handle: int
+    title: str
+    process_id: int
+    process_name: str
+    integrity_level: str | None = None
+
+
+class MonitorObservation(BaseModel):
+    monitor_id: str
+    left: int
+    top: int
+    width: int
+    height: int
+    dpi_x: int | None
+    dpi_y: int | None
+    primary: bool
+    image_ref: str
+    image_sha256: str
+
+
+class Observation(BaseModel):
+    run_id: str
+    revision: int
+    timestamp: datetime
+    foreground_window: WindowIdentity | None
+    monitors: list[MonitorObservation]
+    coordinate_space_id: str
+    ui_tree_ref: str | None
+    ui_tree_sha256: str | None
+    browser_state_ref: str | None
+    clipboard_available: bool
+```
+
+Every observation must include:
+
+- timestamp;
+- foreground window;
+- process identity;
+- screen artifact;
+- screen hash;
+- monitor origin and size;
+- DPI when available;
+- coordinate-space identifier;
+- UI tree hash;
+- environment revision.
+
+An action is stale if its revision or coordinate-space identifier does not match the current environment.
+
+---
+
+## 9. Permit model
+
+```python
+# packages/protocol/permits.py
+from datetime import datetime
+from pydantic import BaseModel
+
+
+class HumanConfirmation(BaseModel):
+    confirmation_id: str
+    phrase: str
+    action_summary: str
+    content_sha256: str | None
+    expires_at: datetime
+
+
+class ActionPermit(BaseModel):
+    permit_id: str
+    run_id: str
     action_id: str
-    action: ClickAction | UIAInvokeAction
-    expected_result: dict
-    risk: str
+    tool: str
+    arguments_sha256: str
+    observation_revision: int
+    coordinate_space_id: str | None
+    window_handle: int | None
+    process_id: int | None
+    expires_at: datetime
+    max_uses: int = 1
+    uses: int = 0
+    requires_human_confirmation: bool
+    confirmation: HumanConfirmation | None = None
 ```
 
-Reject:
+Validation must check:
 
-- Unknown action kinds
-- Missing target identifiers
-- Invalid coordinates
-- Invalid key names
-- Actions referencing stale UI elements
-- Action batches after the first failed action
-- Unpermitted side effects
-- Arbitrary Python or shell code
-
-### Step 1.4: Define permits
-
-A permit must bind authorization to the exact action:
-
-```json
-{
-  "permit_id": "permit-123",
-  "run_id": "run-123",
-  "action_id": "action-456",
-  "decision": "permit",
-  "tool": "uia.invoke",
-  "arguments_hash": "sha256:...",
-  "screen_hash": "sha256:...",
-  "window_handle": "0x123456",
-  "allowed_tools": ["uia.invoke"],
-  "ttl_seconds": 10,
-  "max_uses": 1,
-  "requires_human_confirmation": false
-}
-```
-
-Validate before execution:
-
-1. Permit exists.
-2. Permit belongs to the same run.
-3. Permit references the same action ID.
-4. Tool name matches.
-5. Arguments hash matches.
-6. Environment revision or screen hash is still valid.
-7. Foreground window/process is still allowed.
-8. Permit has not expired.
-9. Permit use count is not exhausted.
-10. Human confirmation exists if required.
-
-### Step 1.5: Define verification results
-
-Use:
-
-```json
-{
-  "message_type": "verify_result",
-  "run_id": "run-123",
-  "action_id": "action-43",
-  "outcome": "success",
-  "evidence": [
-    {
-      "kind": "uia_property",
-      "artifact_ref": "artifact://observations/43.json",
-      "artifact_hash": "sha256:...",
-      "validated": true
-    }
-  ],
-  "notes": "Target edit control now contains the requested value."
-}
-```
-
-Supported outcomes:
-
-```text
-success
-retry
-repair
-rollback
-```
-
-No action may transition to verified success without evidence.
-
----
-
-## Phase 2: Implement the Windows executor
-
-Create a standalone executor service that can be tested independently of model calls.
-
-Suggested structure:
-
-```text
-packages/windows-executor/
-├── screen_capture.py
-├── coordinate_mapper.py
-├── ui_automation.py
-├── input_adapter.py
-├── window_manager.py
-├── process_manager.py
-├── clipboard_manager.py
-├── browser_adapter.py
-├── cancellation.py
-├── action_validator.py
-└── journal.py
-```
-
-If retaining NeuralAgent’s Python structure, place the equivalent components under:
-
-```text
-desktop/aiagent/executor/
-```
-
-### Step 2.1: Implement screen capture
-
-Support:
-
-```text
-full virtual desktop
-per-monitor capture
-active-window capture
-region capture
-```
-
-Every capture must record:
-
-```text
-monitor identity
-physical dimensions
-virtual-desktop origin
-DPI/scale metadata when available
-model canvas dimensions
-coordinate transform
-timestamp
-SHA-256 hash
-artifact reference
-```
-
-Support redaction before sending screenshots to a provider. The exact redaction mechanism is not specified by the research and must be designed and tested.
-
-### Step 2.2: Replace fixed coordinate assumptions
-
-NeuralAgent currently uses:
+1. permit exists;
+2. same `run_id`;
+3. same `action_id`;
+4. same tool;
+5. exact argument hash;
+6. current observation revision;
+7. current coordinate-space identifier;
+8. expected foreground window;
+9. expected process;
+10. not expired;
+11. use count available;
+12. required confirmation present and unexpired.
 
 ```python
-TARGET_W = 1280
-TARGET_H = 720
-```
-
-Retain a normalized model canvas only if the transform is explicit and reversible. Store:
-
-```json
-{
-  "virtual_screen": {
-    "left": -1920,
-    "top": 0,
-    "width": 3840,
-    "height": 2160
-  },
-  "monitors": [],
-  "model_canvas": {
-    "width": 1280,
-    "height": 720
-  },
-  "transform": {
-    "type": "per_monitor_affine"
-  }
-}
-```
-
-Reject or pause when:
-
-- Monitor metadata is missing.
-- The active monitor changes unexpectedly.
-- Screenshot and input coordinate spaces do not match.
-- The target lies outside the permitted screen bounds.
-- DPI changes invalidate the mapping.
-
-### Step 2.3: Implement UI Automation discovery
-
-Use the existing `uiautomation` approach as the starting point:
-
-```python
-foreground = auto.GetForegroundControl()
-```
-
-Extract, where available:
-
-```text
-element ID
-control type
-name/label
-automation ID
-class name
-bounds
-enabled state
-focused state
-process ID
-window handle
-supported control patterns
-```
-
-Use the control tree to create stable references. Do not rely solely on labels and rectangles.
-
-### Step 2.4: Implement semantic UIA operations
-
-Implement adapters for:
-
-```text
-InvokePattern
-ValuePattern
-TextPattern
-SelectionPattern
-ExpandCollapsePattern
-ScrollPattern
-WindowPattern
-TransformPattern
-```
-
-Action selection order:
-
-1. Use an appropriate UIA control pattern.
-2. Use application DOM/API if available.
-3. Use keyboard shortcut if reliable and authorized.
-4. Use coordinate interaction as a fallback.
-5. Pause and escalate if the target cannot be identified safely.
-
-### Step 2.5: Implement coordinate and input fallback
-
-Support the existing action family:
-
-```text
-left_click
-double_click
-triple_click
-right_click
-mouse_move
-left_click_drag
-left_mouse_down
-left_mouse_up
-key
-key_combo
-type
-hold_key
-scroll
-wait
-request_screenshot
-```
-
-Ensure cancellation always:
-
-- Releases held mouse buttons.
-- Releases held keys.
-- Stops long text input.
-- Stops queued actions.
-- Persists a cancellation event.
-
-### Step 2.6: Implement safe text input
-
-Retain the existing distinction between ASCII typing and clipboard-based Unicode insertion, but add:
-
-```text
-focus verification
-secure-field detection
-secret redaction
-paste success verification
-cancellation
-user-visible action status
-```
-
-Do not type secrets or authentication codes without an explicit policy and confirmation path.
-
-### Step 2.7: Implement application launch and readiness
-
-NeuralAgent currently attempts:
-
-```text
-start "" "app_name"
-PowerShell Get-StartApps
-explorer.exe shell:AppsFolder\\APPID
-```
-
-Implement launch as a typed operation, not a free-form shell string. The application name must be safely escaped and validated.
-
-Return:
-
-```json
-{
-  "success": true,
-  "process_id": 1234,
-  "window_handle": "0x123456",
-  "window_title": "Notepad",
-  "ready": true
-}
-```
-
-After launch:
-
-1. Identify the process.
-2. Identify the window.
-3. Wait for readiness.
-4. Verify foreground focus.
-5. Capture a new observation.
-6. Permit follow-up actions only against the verified process/window.
-
-### Step 2.8: Implement window focus safely
-
-Improve the existing title-matching behavior by preferring:
-
-```text
-process ID
-window handle
-exact window identity
-```
-
-Use title fragments only as fallback.
-
-Before every input mutation:
-
-1. Check expected process ID.
-2. Check expected window handle.
-3. Bring the window to the foreground.
-4. Verify the foreground window.
-5. Abort if the wrong window is active.
-
-Detect and pause on:
-
-```text
-UAC prompt
-secure desktop
-credential dialog
-MFA prompt
-Windows Hello
-protected desktop
-```
-
-The agent must not bypass authentication or security prompts.
-
-### Step 2.9: Add browser automation
-
-Use browser automation when a browser DOM or CDP session is available. The research identifies Playwright/CDP-style browser automation as the appropriate layer, while NeuralAgent currently has browser/background support.
-
-Use the hierarchy:
-
-```text
-browser DOM/API
-UI Automation
-keyboard shortcuts
-coordinate interaction
-```
-
-Keep browser sessions alive across action cycles. Capture browser state and screenshots after actions.
-
-### Step 2.10: Add executor-local journaling
-
-Persist every action transition:
-
-```text
-PROPOSED
-PERMITTED
-DISPATCHED
-COMPLETED
-VERIFIED
-FAILED
-RETRIED
-ROLLED_BACK
-CANCELLED
-```
-
-Write the journal before dispatching the action so a crash cannot erase the fact that an action was attempted.
-
----
-
-## Phase 3: Implement persistence and artifacts
-
-### Step 3.1: Start with local-first persistence
-
-Use SQLite for the desktop-first implementation.
-
-Store:
-
-```text
-runs
-tasks
-plans
-subtasks
-protocol_messages
-computer_actions
-action_permits
-action_results
-verification_results
-events
-claims
-evidence
-human_confirmations
-voice_commands
-checkpoints
-memory_entries
-```
-
-Use the dual-lobe-proxy model concepts as the schema reference:
-
-```text
-Run
-Event
-Claim
-Evidence
-BState
-BJob
-Outbox
-MemoryEntry
-ProviderAttempt
-```
-
-### Step 3.2: Add artifact storage
-
-Store screenshots and other evidence outside the main event rows:
-
-```text
-%LOCALAPPDATA%\\DualLobeAgent\\
-├── agent.db
-├── artifacts\\
-├── screenshots\\
-├── logs\\
-├── voice\\
-└── checkpoints\\
-```
-
-Each artifact record must contain:
-
-```text
-artifact ID
-kind
-path or object reference
-SHA-256 hash
-creation time
-run ID
-action ID
-observation revision
-retention status
-redaction status
-```
-
-### Step 3.3: Implement append-only events
-
-Events must be immutable. Corrections are represented by later events.
-
-Include:
-
-```text
-run_created
-plan_drafted
-plan_signed
-action_proposed
-permit_issued
-confirmation_requested
-confirmation_received
-action_dispatched
-action_completed
-action_failed
-verification_requested
-verification_completed
-checkpoint_created
-recovery_started
-escalation_requested
-user_cancelled
-run_completed
-```
-
-### Step 3.4: Add checkpoints
-
-A checkpoint must capture:
-
-```text
-run state
-current task/subtask
-verified environment revision
-foreground window
-last verified action
-pending permit
-recovery attempt count
-memory summary
-required next evidence
-```
-
-Use checkpoints to recover after:
-
-```text
-process crash
-provider timeout
-network failure
-desktop application crash
-system restart
+def validate_permit(
+    permit: ActionPermit,
+    action: ComputerAction,
+    current: Observation,
+    arguments_sha256: str,
+) -> None:
+    if permit.run_id != action.run_id:
+        raise PermitMismatch("run_id")
+    if permit.action_id != action.action_id:
+        raise PermitMismatch("action_id")
+    if permit.arguments_sha256 != arguments_sha256:
+        raise PermitMismatch("arguments_sha256")
+    if permit.observation_revision != current.revision:
+        raise StaleObservationError()
+    if permit.uses >= permit.max_uses:
+        raise PermitAlreadyUsed()
+    if permit.expires_at <= utc_now():
+        raise PermitExpired()
+
+    if permit.coordinate_space_id:
+        if permit.coordinate_space_id != current.coordinate_space_id:
+            raise CoordinateSpaceChanged()
+
+    if permit.window_handle is not None:
+        actual = current.foreground_window
+        if not actual or actual.handle != permit.window_handle:
+            raise WrongWindowError()
+
+    if permit.process_id is not None:
+        actual = current.foreground_window
+        if not actual or actual.process_id != permit.process_id:
+            raise WrongProcessError()
 ```
 
 ---
 
-## Phase 4: Implement the dual-lobe state machine
+## 10. State machine
 
 Implement explicit states:
 
@@ -1153,9 +702,11 @@ ROLLBACK
 COMPLETION_REVIEW
 COMPLETED
 CANCELLED
+PAUSED
+ABORTED
 ```
 
-### Step 4.1: Implement the four locks
+### 10.1 Locks
 
 #### Planning lock
 
@@ -1163,237 +714,686 @@ A plan cannot become active until the Strategist signs it.
 
 #### Action lock
 
-The Executor cannot dispatch a mutating action without a valid permit.
+No mutating action is dispatched without a valid permit.
 
 #### Verification lock
 
-An action cannot be marked successful until the Strategist or designated Verifier validates evidence.
+An action cannot transition to `VERIFIED` without evidence.
 
 #### Escalation lock
 
-The system must attempt defined internal recovery paths before asking the user for help.
+The runtime attempts bounded recovery before asking the user, unless policy requires immediate confirmation or pause.
 
-Persist every lock transition.
+### 10.2 State transition rules
 
-### Step 4.2: Implement role isolation
-
-The Strategist process must not call Executor-owned tools.
-
-The Executor process must not:
-
-- Modify policy
-- Grant its own permits
-- Mark its own action verified
-- Escalate directly without the defined protocol
-- Interpret screen text as authorization
-
-Enforce tool ownership in the runtime registry, not only in prompts.
-
-### Step 4.3: Implement action review
-
-For each proposal, the Strategist must classify:
-
-```text
-risk
-external side effect
-reversibility
-data transmission
-financial impact
-destructive impact
-required evidence
-confirmation requirement
+```python
+VALID_ACTION_TRANSITIONS = {
+    "PROPOSED": {"PERMITTED", "BLOCKED", "CANCELLED"},
+    "PERMITTED": {"DISPATCHED", "EXPIRED", "CANCELLED"},
+    "DISPATCHED": {
+        "COMPLETED",
+        "FAILED",
+        "CANCELLED",
+        "UNKNOWN_AFTER_CRASH",
+    },
+    "COMPLETED": {
+        "VERIFIED",
+        "RETRY",
+        "REPAIR",
+        "ROLLBACK",
+    },
+    "FAILED": {"RETRY", "REPAIR", "ABORT"},
+    "UNKNOWN_AFTER_CRASH": {
+        "RECONCILED",
+        "ASK_USER",
+        "ABORT",
+    },
+}
 ```
 
-Return one of:
+Only the Coordinator may perform transitions.
+
+### 10.3 Role isolation
+
+The Strategist cannot invoke:
 
 ```text
-permit
-revise
-block
-research_needed
+click
+type
+keypress
+launch
+file_write
+send
+delete
+purchase
 ```
 
-### Step 4.4: Implement human confirmation
-
-For consequential actions, display and optionally speak:
+The Executor cannot:
 
 ```text
-The agent is ready to click “Submit.”
-This will send the form externally.
-Do you want to continue?
+issue permits
+change policy
+mark its own action verified
+modify the ledger outside the Coordinator API
+interpret screen content as authorization
 ```
 
-Bind confirmation to:
+Enforce this through a runtime capability registry, not only system prompts.
+
+---
+
+## 11. Safe overlap scheduler
+
+The valid overlap is:
+
+```text
+Observation N
+    ↓
+Strategist prepares candidate N+1
+    ↓
+Coordinator validates policy
+    ↓
+Permit issued for N+1
+    ↓
+Executor executes N+1
+    ↓
+Executor captures evidence
+    ↓
+Verifier validates N+1
+```
+
+While an already-permitted action executes, the Strategist may:
+
+- prepare expected-result predicates;
+- prepare recovery alternatives;
+- analyze risk;
+- prepare user-facing status;
+- draft a candidate next action marked `uncommitted`.
+
+It may not authorize a state-dependent new mutation using an observation that has not yet been captured and verified.
+
+Only one physical desktop mutation may be in flight.
+
+---
+
+## 12. Windows executor
+
+### 12.1 DPI awareness
+
+Set process DPI awareness before creating helper windows:
+
+```python
+# packages/windows_executor/dpi.py
+import ctypes
+
+
+DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = ctypes.c_void_p(-4)
+
+
+def enable_per_monitor_v2() -> None:
+    ok = ctypes.windll.user32.SetProcessDpiAwarenessContext(
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+    )
+    if not ok:
+        raise RuntimeError("Unable to enable Per-Monitor V2 DPI awareness")
+```
+
+This must be tested on supported Windows builds. If it fails, the executor must enter safe mode rather than silently applying coordinates.
+
+### 12.2 Coordinate metadata
+
+Replace the fixed `1280 × 720` assumption with:
+
+```python
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class CoordinateSpace:
+    source_left: int
+    source_top: int
+    source_width: int
+    source_height: int
+    model_width: int
+    model_height: int
+    dpi_x: int | None
+    dpi_y: int | None
+    topology_hash: str
+    transform_version: str = "virtual-desktop-affine-v1"
+
+
+def model_to_screen(
+    x_model: float,
+    y_model: float,
+    space: CoordinateSpace,
+) -> tuple[int, int]:
+    x = space.source_left + round(
+        x_model * space.source_width / space.model_width
+    )
+    y = space.source_top + round(
+        y_model * space.source_height / space.model_height
+    )
+    return x, y
+```
+
+Reject an action when:
+
+- display topology changed;
+- monitor metadata is missing;
+- screenshot is stale;
+- target is outside the virtual desktop;
+- DPI awareness is unknown;
+- active monitor changed unexpectedly.
+
+### 12.3 Screenshot capture
+
+MVP:
+
+- use `mss` for still screenshots;
+- capture the virtual desktop and monitor metadata;
+- store the exact mapping used;
+- hash the resulting PNG;
+- store artifacts outside the ledger.
+
+Future native capture:
+
+- Windows.Graphics.Capture for window/display capture;
+- Desktop Duplication for high-frequency full-desktop capture.
+
+Do not claim high-frequency capture until the native path is tested.
+
+### 12.4 UI Automation element references
+
+```python
+class ElementRef(BaseModel):
+    ref_id: str
+    window_handle: int
+    process_id: int
+    runtime_id: list[int] | None
+    automation_id: str | None
+    control_type: str
+    name: str | None
+    class_name: str | None
+    bounding_rect: tuple[int, int, int, int] | None
+    supported_patterns: set[str]
+    observation_revision: int
+    structural_path: list[int] | None
+```
+
+Re-resolution order:
+
+1. window handle;
+2. process ID;
+3. RuntimeId;
+4. AutomationId;
+5. structural path;
+6. control type plus normalized name;
+7. rectangle proximity only as a last resort.
+
+Runtime IDs are session-scoped and cannot be treated as globally permanent.
+
+### 12.5 Semantic action hierarchy
+
+Use this order:
+
+```text
+1. UI Automation control pattern
+2. Browser DOM/API
+3. Keyboard shortcut
+4. Coordinate interaction
+5. Pause and escalate
+```
+
+UIA patterns include:
+
+```text
+Invoke
+Value
+Text
+Selection
+SelectionItem
+ExpandCollapse
+Scroll
+Window
+Transform
+Toggle
+LegacyIAccessible
+```
+
+Example:
+
+```python
+def invoke_element(element_ref: ElementRef) -> ActionResult:
+    element = resolve_element(element_ref)
+    patterns = element.supported_patterns()
+
+    if "Invoke" in patterns:
+        element.invoke()
+        mechanism = "Invoke"
+    elif "LegacyIAccessible" in patterns:
+        element.default_action()
+        mechanism = "LegacyIAccessible"
+    elif "SelectionItem" in patterns:
+        element.select()
+        mechanism = "SelectionItem"
+    else:
+        raise UnsupportedPatternError(element_ref.ref_id)
+
+    return ActionResult(
+        success=True,
+        mechanism=mechanism,
+        target_ref=element_ref.ref_id,
+    )
+```
+
+The concrete `uiautomation` method names must be verified against the selected locked package version before implementation. The runtime behavior is mandatory: re-resolve, inspect pattern availability, act semantically, return the mechanism, and capture post-state.
+
+### 12.6 Window focus
+
+Before every focus-dependent mutation:
+
+1. inspect current foreground window;
+2. compare handle and process ID;
+3. attempt focus;
+4. verify foreground state;
+5. abort if the wrong window is active.
+
+Title substrings are not authoritative.
+
+Pause for:
+
+```text
+UAC
+Windows Hello
+MFA
+credential dialogs
+secure desktop
+lock screen
+elevated windows
+```
+
+Do not attempt to bypass UIPI or security prompts.
+
+### 12.7 Application launch
+
+Never execute model-provided shell strings such as:
+
+```python
+subprocess.Popen(f'start "" "{app_name}"', shell=True)
+```
+
+Use a local allowlisted launch registry:
+
+```python
+class LaunchTarget(BaseModel):
+    target_id: str
+    display_name: str
+    executable: str
+    expected_process_name: str
+    allowed: bool = True
+```
+
+The model requests a `target_id`, never an arbitrary command.
+
+Launch sequence:
+
+1. resolve target from local registry;
+2. launch without shell interpretation where possible;
+3. record child process ID;
+4. locate its window;
+5. wait for readiness;
+6. verify foreground identity;
+7. capture a fresh observation;
+8. authorize later actions only against the verified process/window.
+
+### 12.8 Cancellation-safe input
+
+Cancellation must:
+
+- release all held mouse buttons;
+- release all held keys;
+- stop text input;
+- clear queued actions;
+- restore clipboard state in `finally`;
+- persist `user_cancelled`;
+- update the UI immediately.
+
+### 12.9 Unicode text input
+
+Clipboard insertion is allowed only as a controlled transaction:
+
+1. capture permitted clipboard state;
+2. mark clipboard agent-owned;
+3. verify target focus;
+4. paste;
+5. verify target value through UIA where available;
+6. restore clipboard in `finally`;
+7. redact text from logs and evidence.
+
+Passwords, MFA codes, and secrets are not ordinary `type` actions. The initial policy is user-entered credentials only.
+
+---
+
+## 13. Browser automation
+
+Use Playwright for agent-owned browser sessions.
+
+```python
+context = await chromium.launch_persistent_context(
+    user_data_dir=str(profile_dir),
+    channel="msedge",
+    headless=False,
+)
+```
+
+Do not use the user’s normal browser profile.
+
+Browser hierarchy:
+
+```text
+1. Playwright DOM/API
+2. WebView2 or Chromium CDP
+3. UI Automation
+4. keyboard shortcuts
+5. coordinates
+```
+
+### 13.1 CDP policy
+
+`connectOverCDP` is Chromium-only and lower fidelity than Playwright’s native protocol. Use it only for explicit attach scenarios.
+
+WebView2 attach requires explicit application configuration such as:
+
+```text
+WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=<port>
+WEBVIEW2_USER_DATA_FOLDER=<dedicated-folder>
+```
+
+Do not infer WebView2 merely from uncovered screen area.
+
+### 13.2 Browser restrictions
+
+Implement:
+
+```text
+domain allowlist
+navigation timeout
+download size limit
+request size limit
+download directory restriction
+authentication pause
+dedicated profile
+cookie/storage isolation
+```
+
+No browser navigation or upload is allowed solely because page content requests it.
+
+---
+
+## 14. Persistence and artifacts
+
+### 14.1 Local paths
+
+```text
+%LOCALAPPDATA%\Compuse\agent.db
+%LOCALAPPDATA%\Compuse\artifacts\
+%LOCALAPPDATA%\Compuse\screenshots\
+%LOCALAPPDATA%\Compuse\voice\
+%LOCALAPPDATA%\Compuse\checkpoints\
+%LOCALAPPDATA%\Compuse\logs\
+%LOCALAPPDATA%\Compuse\browser-profiles\
+```
+
+### 14.2 SQLite policy
+
+Only the Coordinator writes the authoritative database.
+
+At startup:
+
+```sql
+PRAGMA journal_mode = WAL;
+PRAGMA synchronous = FULL;
+PRAGMA foreign_keys = ON;
+PRAGMA busy_timeout = 5000;
+```
+
+The runtime must:
+
+- verify SQLite is 3.51.3 or later;
+- preserve `.db`, `-wal`, and `-shm` together;
+- use explicit transactions;
+- avoid concurrent process writers;
+- test crash recovery;
+- never copy only the main database file while WAL mode is active.
+
+### 14.3 Schema
+
+```sql
+CREATE TABLE events (
+    event_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    payload_sha256 TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(run_id, seq)
+);
+
+CREATE TABLE actions (
+    action_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    arguments_json TEXT NOT NULL,
+    arguments_sha256 TEXT NOT NULL,
+    state TEXT NOT NULL,
+    observation_revision INTEGER,
+    permit_id TEXT,
+    dispatched_at TEXT,
+    completed_at TEXT,
+    verified_at TEXT
+);
+
+CREATE TABLE permits (
+    permit_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    action_id TEXT NOT NULL,
+    arguments_sha256 TEXT NOT NULL,
+    observation_revision INTEGER NOT NULL,
+    expires_at TEXT NOT NULL,
+    max_uses INTEGER NOT NULL,
+    uses INTEGER NOT NULL DEFAULT 0,
+    human_confirmation_id TEXT
+);
+```
+
+Additional tables:
+
+```text
+runs
+tasks
+plans
+subtasks
+observations
+verification_results
+evidence
+human_confirmations
+checkpoints
+provider_attempts
+voice_commands
+memory_entries
+desktop_sessions
+```
+
+### 14.4 Append-only events
+
+Persist:
+
+```text
+run_created
+plan_drafted
+plan_signed
+observation_captured
+action_proposed
+permit_issued
+confirmation_requested
+confirmation_received
+action_dispatched
+action_completed
+action_failed
+verification_requested
+verification_completed
+checkpoint_created
+recovery_started
+escalation_requested
+user_cancelled
+run_completed
+```
+
+Corrections are new events, never edits to old events.
+
+### 14.5 Artifact records
+
+Each artifact stores:
+
+```text
+artifact_id
+kind
+path/reference
+sha256
+run_id
+action_id
+observation_revision
+created_at
+redaction_status
+retention_status
+```
+
+Artifacts include:
+
+```text
+screenshots
+UIA trees
+browser DOM snapshots
+download hashes
+clipboard metadata
+verification reports
+audio only if explicitly enabled
+```
+
+---
+
+## 15. Verification
+
+Every mutation requires:
+
+```text
+pre-observation
+action event
+post-observation
+verification result
+```
+
+A provider response or dispatched input event is not evidence of success.
+
+### 15.1 Deterministic verification adapters
+
+Implement:
+
+```text
+UIA property/value
+UIA control existence/disappearance
+foreground process/window
+window title
+browser DOM predicate
+clipboard value
+file existence/hash
+download hash
+application notification
+test result
+```
+
+### 15.2 Verification result
+
+```python
+class Evidence(BaseModel):
+    kind: str
+    artifact_ref: str
+    artifact_sha256: str
+    validated: bool
+    origin: ContentOrigin
+
+
+class VerificationResult(BaseModel):
+    action_id: str
+    outcome: Literal[
+        "success",
+        "retry",
+        "repair",
+        "rollback",
+        "ask_user",
+        "abort",
+    ]
+    evidence: list[Evidence]
+    notes: str
+```
+
+Prefer deterministic verification. Use a separate Verifier model only when the deterministic adapters cannot decide.
+
+The Executor cannot mark its own action verified.
+
+---
+
+## 16. Risk and confirmation policy
+
+Require exact human confirmation by default for:
+
+```text
+send
+submit
+purchase
+pay
+delete
+publish
+deploy
+upload
+share
+accept terms
+close unsaved work
+install software
+change security settings
+enter credentials
+transmit sensitive data
+```
+
+Confirmation is bound to:
 
 ```text
 run ID
 action ID
 target
 arguments/content hash
+risk class
 expiration
-exact operation
+exact confirmation phrase
 ```
 
-Do not accept generic “yes” for a changed or stale action.
+Example UI/speech prompt:
+
+```text
+The agent is ready to click “Submit”.
+This will send the form to the external website.
+Say “confirm submit” or choose Confirm.
+```
+
+Generic “yes” must not authorize an action whose target or hash changed.
 
 ---
 
-## Phase 5: Implement bounded Strategist/Executor overlap
+## 17. Recovery and crash semantics
 
-### Step 5.1: Use a bounded pipeline
-
-Use this sequence:
-
-```text
-Observation N
-    ↓
-Strategist prepares candidate action N+1
-    ↓
-Strategist issues permit N+1
-    ↓
-Executor executes N+1
-    ↓
-Executor captures evidence
-    ↓
-Strategist verifies N+1
-```
-
-While the Executor is performing an already-permitted action, the Strategist may:
-
-- Evaluate the expected result.
-- Prepare recovery options.
-- Analyze risk.
-- Prepare candidate next actions.
-- Inspect prior evidence.
-- Prepare verification criteria.
-
-The Strategist may not authorize a new state-dependent action based on an observation that has not yet been captured.
-
-### Step 5.2: Classify action overlap
-
-#### Low-risk, reversible actions
-
-Examples:
-
-```text
-mouse movement
-hover
-screenshot
-read UI tree
-focus a known window
-safe scrolling
-```
-
-These may be prepared and, where the environment is stable, pipelined with minimal delay.
-
-#### Local reversible mutations
-
-Examples:
-
-```text
-type into a verified field
-select a dropdown
-open an application
-switch tabs
-```
-
-These require a scoped permit and post-action verification.
-
-#### External or potentially reversible side effects
-
-Examples:
-
-```text
-save a file
-upload a file
-change an account setting
-send a draft
-```
-
-These require exact target and argument binding, evidence, and policy evaluation.
-
-#### Irreversible or consequential actions
-
-Examples:
-
-```text
-purchase
-payment
-delete
-send message
-submit
-publish
-deploy
-accept terms
-```
-
-These require human confirmation by default.
-
-### Step 5.3: Add stale-state protection
-
-Every state-dependent action must include:
-
-```text
-observation revision
-screen hash
-UI tree hash
-foreground window
-process ID
-target element identity
-```
-
-Reject the action if any required precondition has changed.
-
-### Step 5.4: Add device-level serialization
-
-The proxy currently uses per-run Postgres advisory locking. That is insufficient for a physical desktop controlled by multiple runs.
-
-Implement a lock over:
-
-```text
-device_id
-desktop_session_id
-window_scope
-executor_instance_id
-```
-
-For one physical desktop, allow only one mutating action in flight. For isolated virtual desktops or VMs, the lock may be scoped to the isolated environment.
-
----
-
-## Phase 6: Implement verification and recovery
-
-### Step 6.1: Add independent verification modes
-
-Implement verification adapters for:
-
-```text
-UIA property/value
-window title
-foreground process
-screenshot comparison
-browser DOM
-clipboard value
-file existence and hash
-download result
-application notification
-test result
-API response
-```
-
-### Step 6.2: Verify actual state, not model claims
-
-The Verifier must inspect artifacts generated by the Executor. It must not rely solely on:
-
-```text
-“I clicked the button”
-“The form was submitted”
-“The file was saved”
-```
-
-### Step 6.3: Implement recovery categories
-
-Use:
+Recovery categories:
 
 ```text
 retry
@@ -1404,17 +1404,31 @@ ask_user
 abort
 ```
 
-Examples:
+Rules:
 
-- Retry with the same action only if the action is idempotent and evidence indicates a transient failure.
-- Repair when the expected target moved or focus was lost.
-- Roll back only when a verified rollback operation exists.
-- Ask the user when authentication, ambiguity, or consequential confirmation blocks progress.
-- Abort when policy or safety cannot be satisfied.
+- retry only idempotent actions or actions with evidence of transient failure;
+- repair focus or re-resolve a target only when policy allows;
+- rollback only when a verified inverse exists;
+- ask the user for authentication, ambiguity, or consequential confirmation;
+- abort when policy cannot be satisfied.
 
-### Step 6.4: Implement watchdog signals
+After restart:
 
-Detect:
+1. load the latest checkpoint;
+2. find actions dispatched but not verified;
+3. capture a fresh observation;
+4. compare environment and evidence;
+5. never automatically repeat uncertain external side effects;
+6. reconcile deterministically where possible;
+7. ask the user when state remains uncertain.
+
+An action that may have sent, purchased, deleted, or submitted must be treated as `UNKNOWN_AFTER_CRASH`, not failed.
+
+---
+
+## 18. Watchdog
+
+Detect and persist:
 
 ```text
 no workspace update
@@ -1423,22 +1437,29 @@ repeated plan hash
 repeated failed tool call
 expired permit
 missed heartbeat
-repeated screenshot with no progress
-repeated click at same coordinates
 unchanged screen after expected mutation
+repeated click at same coordinate
 wrong foreground window
-permit/revise cycle with no new evidence
+repeated screenshot with no progress
+permit/revision loop with no evidence
 ```
 
-Persist watchdog events and transition to recovery rather than looping indefinitely.
+Watchdog behavior:
+
+```text
+first stall → request observation
+second stall → cancel speculative work
+third stall → enter RECOVERY
+unsafe/ambiguous state → pause and ask user
+```
+
+No infinite retry loops.
 
 ---
 
-## Phase 7: Implement provider routing
+## 19. Provider routing
 
-### Step 7.1: Define provider roles
-
-Configure separate routes for:
+Configure separate logical routes:
 
 ```text
 STRATEGIST_PROVIDER
@@ -1449,58 +1470,17 @@ VOICE_TTS_PROVIDER
 EMBEDDING_PROVIDER
 ```
 
-The existing NeuralAgent roles can inform the mapping:
+Provider-specific formats must remain inside adapters.
+
+Track every provider attempt:
 
 ```text
-PLANNER_AGENT → Strategist
-COMPUTER_USE_AGENT → Executor
-new VERIFIER_AGENT → Verifier
-```
-
-Do not assume role names alone provide isolation. Enforce isolation in the runtime.
-
-### Step 7.2: Normalize provider-specific formats
-
-Implement adapters for provider-specific:
-
-```text
-tool calls
-computer actions
-image inputs
-streaming events
-usage metadata
-errors
-```
-
-Convert them immediately into the internal schemas.
-
-### Step 7.3: Add multimodal request validation
-
-Validate:
-
-```text
-image type
-image dimensions
-payload size
-artifact existence
-run association
-redaction state
-provider capability
-```
-
-Reject unsupported input before sending it to a provider.
-
-### Step 7.4: Track provider attempts
-
-Reuse the proxy’s ProviderAttempt concept. Record:
-
-```text
-run ID
-call ID
+run_id
+call_id
 provider alias
-logical model
-streaming flag
+model
 request hash
+streaming flag
 latency
 token usage
 status
@@ -1508,62 +1488,75 @@ error type
 timestamps
 ```
 
-Use this for debugging, cost limits, and evaluation.
+### 19.1 OpenAI adapter
+
+Normalize typed `computer_call` actions, preserving:
+
+```text
+provider call ID
+previous response ID
+provider action index
+pending safety checks
+original provider payload
+```
+
+Provider safety checks are advisory metadata. Local permits remain authoritative.
+
+### 19.2 Anthropic adapter
+
+Normalize member-tool or dated computer-use actions while preserving:
+
+```text
+provider tool-use ID
+batch index
+ordered execution
+stop-on-first-failure behavior
+provider screenshot result
+```
+
+If an ordered provider batch contains a failure, later actions are marked `NOT_EXECUTED`; they are not silently attempted.
+
+### 19.3 Multimodal validation
+
+Before provider dispatch:
+
+```text
+image MIME type
+image dimensions
+payload size
+artifact existence
+artifact/run association
+redaction status
+provider capability
+```
+
+The old text-only rejection must not simply be removed. Add controlled artifact references, limits, hashing, and capability checks.
 
 ---
 
-## Phase 8: Implement voice interaction
+## 20. Voice
 
-### Step 8.1: Create the voice pipeline
-
-Implement:
+### 20.1 MVP pipeline
 
 ```text
-microphone
-→ audio capture
-→ voice activity detection
-→ streaming STT
-→ partial transcript events
-→ command arbiter
-→ Strategist or local control path
-→ streamed response text
-→ chunked TTS
-→ speaker
+push-to-talk
+    ↓
+microphone capture
+    ↓
+streaming STT
+    ↓
+partial transcript UI
+    ↓
+final transcript command parser
+    ↓
+Coordinator
+    ↓
+streamed TTS
+    ↓
+speaker
 ```
 
-### Step 8.2: Choose local/cloud speech policy
-
-The findings identify two paths:
-
-1. Windows on-device Speech Recognition where the supported Windows and Windows App SDK requirements are met.
-2. Azure Speech SDK for streaming recognition and synthesis.
-
-Implement a policy such as:
-
-```text
-attempt local recognition
-if unavailable, use configured cloud provider
-if unavailable, offer typed input
-```
-
-The exact Windows compatibility matrix must be established during implementation because the research did not validate runtime availability.
-
-### Step 8.3: Display partial transcripts
-
-Show stable partial results in the UI:
-
-```text
-Listening...
-open the browser...
-open the browser and search...
-open the browser and search for...
-```
-
-Only final or sufficiently stable speech should create a task or mutation.
-
-### Step 8.4: Implement emergency local commands
-
-These commands must bypass the LLM:
+Emergency commands bypass the model:
 
 ```text
 stop
@@ -1571,128 +1564,252 @@ cancel
 pause
 abort
 do not continue
-close agent
 ```
 
-On receipt:
+On emergency stop:
 
-1. Cancel pending provider calls.
-2. Stop queued actions.
-3. Release held keys and mouse buttons.
-4. Stop TTS.
-5. Mark the run cancelled or paused.
-6. Persist the event.
-7. Update the UI immediately.
+1. cancel provider calls;
+2. stop queued actions;
+3. release keys and mouse buttons;
+4. stop TTS;
+5. persist cancellation;
+6. update UI.
 
-### Step 8.5: Implement barge-in
+### 20.2 Azure Speech path
 
-Use audio echo cancellation and prevent the agent’s own TTS from being interpreted as user speech.
+Azure Speech supports continuous recognition, interim `recognizing` events, final `recognized` events, cancellation, push/pull audio, and streamed synthesis.
 
-When the user interrupts:
+Do not authorize mutations from partial transcripts.
+
+### 20.3 Local Windows speech path
+
+Treat these as separate options:
 
 ```text
-stop TTS
-stop or pause execution
-capture current observation
-persist interruption
-route the command
+Windows.Media.SpeechRecognition:
+    broader Windows Runtime path; test packaging and availability
+
+Windows AI streaming recognition:
+    experimental; Windows 11 24H2 and Windows App SDK 1.7.1+
+    behind a feature flag
 ```
 
-### Step 8.6: Implement voice confirmation
+The Electron MVP must not require the experimental Windows AI API.
 
-Confirmation must refer to an exact action:
+### 20.4 Barge-in and echo cancellation
 
-```text
-The agent is ready to send this message to Alice. Say “confirm send” to continue.
-```
+MVP:
 
-Do not accept a confirmation for an expired or changed permit.
+- push-to-talk;
+- local emergency hotkey;
+- stop TTS immediately;
+- no always-listening mode.
 
-### Step 8.7: Implement streamed TTS
+Later:
 
-Use chunked text output and begin playback when the first audio chunk arrives. Reuse synthesizer connections where supported by the selected SDK.
+- VAD;
+- AEC using speaker reference;
+- continuous recognition;
+- wake word;
+- voice confirmation.
 
-Do not speak hidden reasoning. Speak concise operational status.
+Audio retention defaults to discard after transcription. Do not store raw audio without explicit user configuration.
 
 ---
 
-## Phase 9: Build the desktop UI
+## 21. Electron security
 
-### Step 9.1: Add live run status
+Renderer configuration:
+
+```text
+contextIsolation: true
+nodeIntegration: false
+sandbox: true where compatible
+```
+
+Expose only narrow typed APIs:
+
+```typescript
+contextBridge.exposeInMainWorld("compuse", {
+  startRun: (request: StartRunRequest) =>
+    ipcRenderer.invoke("compuse:start-run", request),
+
+  cancelRun: (runId: string) =>
+    ipcRenderer.invoke("compuse:cancel-run", runId),
+
+  confirmPermit: (request: ConfirmationRequest) =>
+    ipcRenderer.invoke("compuse:confirm-permit", request),
+
+  subscribeRun: (runId: string, callback: (event: RunEvent) => void) => {
+    const channel = `compuse:run:${runId}`;
+    const listener = (_event: Electron.IpcRendererEvent, value: RunEvent) =>
+      callback(value);
+    ipcRenderer.on(channel, listener);
+    return () => ipcRenderer.removeListener(channel, listener);
+  },
+});
+```
+
+Do not expose the entire `ipcRenderer`. Validate payloads again in the main process and Coordinator.
+
+---
+
+## 22. Security boundaries
+
+### 22.1 Windows integrity
+
+Initial supported scope:
+
+```text
+same-integrity standard desktop applications
+```
+
+Pause/escalate for:
+
+```text
+elevated applications
+UAC
+Windows Hello
+credential dialogs
+secure desktop
+locked workstation
+```
+
+Do not run the entire product as administrator.
+
+If elevated support is later required, build a narrow, signed UIAccess helper requiring:
+
+- Authenticode signing;
+- secure installation path;
+- correct manifest;
+- separate security review;
+- no direct model/network access.
+
+### 22.2 Sensitive information
+
+Initial policy:
+
+- no model-visible passwords;
+- no model-visible MFA codes;
+- no automatic credential entry;
+- user types secrets manually;
+- pause screenshots during credential entry where possible;
+- never put secrets in logs, events, prompts, or telemetry.
+
+Screen redaction remains defense-in-depth, not a guarantee.
+
+### 22.3 Shell
+
+Shell execution is disabled for MVP.
+
+If later added, require:
+
+```text
+command allowlist
+working-directory restriction
+timeout
+output-size limit
+network policy
+sandbox
+human confirmation
+separate high-risk permit
+full audit trail
+```
+
+### 22.4 Browser/network
+
+Require:
+
+```text
+domain allowlist
+download restrictions
+request and response size limits
+timeouts
+dedicated profile
+authentication pause
+```
+
+---
+
+## 23. Desktop-session locking
+
+Every run obtains a lock:
+
+```text
+device_id
+desktop_session_id
+interactive_user
+foreground-session identity
+executor_instance_id
+```
+
+Only one run may hold the mutation lease for a physical desktop session.
+
+The lock must be released on:
+
+```text
+run completion
+run cancellation
+executor crash
+watchdog timeout
+process shutdown
+```
+
+On abnormal release, the next run must capture a fresh observation before acting.
+
+Per-run serialization is not sufficient protection for a shared physical desktop.
+
+---
+
+## 24. UI implementation
 
 Display:
 
 ```text
-current task
-current subtask
+task and subtask
 Strategist status
 Executor status
 Verifier status
-current window
-current application
-voice status
+current application/window
+environment revision
 permit status
 confirmation state
+voice state
+latest evidence
+recovery state
 ```
 
-### Step 9.2: Add live evidence
-
-Provide views for:
+Evidence views:
 
 ```text
 latest screenshot
-before/after screenshots
-UI Automation tree
+before/after screenshot
+UIA tree
 action timeline
-permit record
+permit details
 verification result
-failure and recovery
+failure/recovery history
 ```
 
-### Step 9.3: Add confirmation controls
-
-Support:
-
-```text
-Confirm
-Reject
-Pause
-Stop
-Edit
-Retry
-```
-
-The UI must show:
+Confirmation card:
 
 ```text
 exact action
 target
 risk
-expected result
-data transmission status
+content/data transmission
 reversibility
 expiration
+required phrase
 ```
 
-### Step 9.4: Add safe operational summaries
-
-Show concise messages such as:
-
-```text
-I found the correct button.
-This action will send the form.
-I need your confirmation before continuing.
-The action was cancelled.
-The task is complete and I verified the result.
-```
-
-Do not expose hidden chain-of-thought.
+Do not display hidden chain-of-thought. Show concise operational summaries.
 
 ---
 
-## Phase 10: Add API and gateway endpoints
+## 25. API surface
 
-If extending dual-lobe-proxy, add computer-use endpoints modeled on its existing API structure:
+Local Coordinator API:
 
 ```text
 POST /v1/computer/runs
@@ -1708,145 +1825,343 @@ GET  /v1/computer/runs/{id}/artifacts/{artifact_id}
 WS   /v1/computer/runs/{id}/stream
 ```
 
-Add records for:
+Every request carries:
 
 ```text
 device_id
 desktop_session_id
-monitor_id
-window_scope
+run_id
+correlation_id
 executor_instance_id
 ```
 
-Use correlation headers and run IDs throughout the Electron, local executor, gateway, provider, and voice layers.
-
----
-
-## Phase 11: Add security controls
-
-### Step 11.1: Implement content trust boundaries
-
-Tag all inputs as one of:
+Use correlation IDs across:
 
 ```text
-user_intent
-system_policy
-strategist_instruction
-executor_instruction
-environment_content
-```
-
-Only system policy, user intent, and authorized Strategist instructions may control the runtime.
-
-### Step 11.2: Implement sensitive-data protections
-
-At minimum plan controls for:
-
-```text
-password fields
-credit cards
-authentication codes
-private messages
-personal files
-health data
-financial documents
-```
-
-Potential implementation mechanisms include:
-
-```text
-screen redaction
-secure-window blocking
-credential vault integration
-credential-field detection
-no screenshot transmission for protected regions
-application allowlists
-user confirmation before external transmission
-```
-
-The research identifies these requirements but does not specify a complete redaction implementation; this remains an engineering gap.
-
-### Step 11.3: Restrict network and browser access
-
-Use allowlists where possible. The external computer-use guidance recommends internet allowlists and isolated environments.
-
-The existing NeuralAgent server-side URL tools do not visibly enforce a complete domain allowlist or comprehensive request-size/time policy. Add those controls before enabling equivalent tools.
-
-### Step 11.4: Defer shell execution
-
-Do not expose arbitrary shell execution in the MVP.
-
-If added later, require:
-
-```text
-disabled-by-default policy
-command allowlist
-working-directory restriction
-timeout
-output-size limit
-network policy
-human confirmation
-sandbox
-full audit trail
-separate high-risk permit
+Electron
+Coordinator
+provider
+executor
+verifier
+voice
+artifact store
 ```
 
 ---
 
-## Phase 12: Package and deploy
+## 26. Observability
 
-### Step 12.1: Create a Windows installer
+Use OpenTelemetry after the local state machine is stable.
 
-The research found no independently verified one-command installer or signed binary distribution in NeuralAgent. Implement and validate:
-
-```text
-Electron application
-Python executor runtime
-voice dependencies
-configuration
-local database
-artifact directories
-provider credentials
-first-run permissions
-```
-
-### Step 12.2: Add crash recovery
-
-On restart:
-
-1. Load the last checkpoint.
-2. Detect actions that were dispatched but not verified.
-3. Capture a fresh observation.
-4. Do not automatically repeat an uncertain external side effect.
-5. Ask the Strategist or user to resolve ambiguity.
-6. Resume only after state is reconciled.
-
-### Step 12.3: Add safe mode
-
-Safe mode should start with:
+Spans:
 
 ```text
-no external side effects
-no shell execution
-screenshots and UI tree only
-human confirmation for every mutation
+run
+strategist_call
+executor_action
+verification
+voice_stt
+voice_tts
+provider_attempt
+artifact_capture
+confirmation_wait
+recovery_attempt
 ```
 
-Use it for diagnostics and first-run validation.
+Attributes:
+
+```text
+run.id
+task.id
+action.id
+permit.id
+lobe
+provider
+model
+environment.revision
+window.handle
+process.id
+action.kind
+risk.class
+verification.outcome
+```
+
+Never include raw:
+
+```text
+passwords
+message bodies
+screen text
+screenshots
+microphone audio
+```
+
+Use artifact IDs, hashes, redaction status, and aggregate metrics.
 
 ---
 
-## Phase 13: Evaluate the implementation
+## 27. Implementation phases
 
-Compare at minimum:
+### Phase 0 — Baseline
+
+1. Create a disposable Windows VM/profile.
+2. Run the existing NeuralAgent flow.
+3. Record screenshots, UI trees, actions, focus, latency, and failures.
+4. Build the failure catalog:
+   - launch;
+   - focus;
+   - UIA;
+   - Unicode typing;
+   - multi-monitor;
+   - DPI;
+   - custom controls;
+   - crash;
+   - cancellation;
+   - UAC;
+   - network timeout;
+   - provider timeout.
+
+Do not use production credentials.
+
+### Phase 1 — Deterministic executor
+
+Implement without models:
+
+- display metadata;
+- screenshots;
+- UIA snapshots;
+- stable element references;
+- semantic invoke/set/select/toggle;
+- safe typing;
+- focus validation;
+- application registry;
+- cancellation;
+- artifact storage;
+- before/action/after journal;
+- dry-run mode.
+
+### Phase 2 — Coordinator and ledger
+
+Implement:
+
+- protocol;
+- SQLite schema;
+- state machine;
+- desktop lock;
+- permits;
+- action transitions;
+- checkpoints;
+- watchdog;
+- deterministic verifier;
+- fake executor/provider tests.
+
+### Phase 3 — Strategist integration
+
+Add:
+
+- plan generation;
+- risk classification;
+- action proposal;
+- required evidence;
+- confirmation policy;
+- bounded overlap.
+
+Initially use one model if necessary, while retaining separate runtime capabilities.
+
+### Phase 4 — Provider adapters
+
+Add:
+
+- OpenAI computer-call adapter;
+- Anthropic computer-use adapter;
+- generic OpenAI-compatible adapter;
+- multimodal artifact handling;
+- provider-attempt telemetry.
+
+### Phase 5 — Browser
+
+Add:
+
+- Playwright persistent profile;
+- DOM actions;
+- download policy;
+- CDP attach;
+- WebView2 explicit attach;
+- browser evidence verification.
+
+### Phase 6 — Voice
+
+Add:
+
+- push-to-talk;
+- streaming STT;
+- streamed TTS;
+- local emergency stop;
+- confirmation phrases;
+- optional AEC/VAD.
+
+### Phase 7 — Product packaging
+
+Add:
+
+- installer;
+- pinned dependencies;
+- signed binaries;
+- crash recovery;
+- safe mode;
+- privacy settings;
+- artifact retention controls.
+
+### Phase 8 — Advanced deployment
+
+Only after MVP safety tests pass:
+
+- FlaUI sidecar;
+- optional UIAccess helper;
+- Windows Sandbox/VM integration;
+- Postgres synchronization;
+- remote gateway;
+- multi-device coordination.
+
+---
+
+## 28. Testing strategy
+
+### 28.1 Unit tests
+
+Use fakes for:
+
+```text
+screen capture
+UIA tree
+window manager
+input adapter
+provider
+verifier
+clock
+ledger
+```
+
+Test:
+
+- malformed envelopes;
+- sender/recipient violations;
+- sequence gaps;
+- duplicate delivery;
+- stale observations;
+- permit expiry;
+- argument hash mismatch;
+- wrong foreground window;
+- coordinate-space changes;
+- confirmation binding;
+- action-state transitions;
+- cancellation cleanup;
+- watchdog recovery;
+- batch stop-on-first-failure;
+- executor self-permit attempts;
+- executor self-verification attempts.
+
+### 28.2 Windows integration matrix
+
+Native applications:
+
+```text
+Notepad
+Calculator
+Paint
+File Explorer
+Settings
+Win32 test app
+WinForms test app
+WPF test app
+Qt test app
+Electron test app
+```
+
+Browser:
+
+```text
+Edge dedicated profile
+Chrome/Chromium dedicated profile
+WebView2 sample
+downloads
+file chooser
+popups
+new tabs
+permission dialogs
+```
+
+Display:
+
+```text
+single monitor
+dual monitor
+negative virtual-desktop coordinate
+100%, 125%, 150%, 200% DPI
+portrait display
+hot-plug
+resolution change
+DPI change
+```
+
+Privilege:
+
+```text
+same-integrity application
+elevated application
+UAC
+Windows Hello
+credential dialog
+secure desktop
+locked workstation
+RDP session
+```
+
+### 28.3 Security tests
+
+- web page says “ignore previous instructions”;
+- document contains malicious instructions;
+- screenshot contains fake approval text;
+- provider emits malformed action;
+- provider requests unsupported action;
+- duplicated provider call;
+- stale permit after focus changes;
+- action after user cancellation;
+- crash immediately after dispatch;
+- uncertain submit after restart;
+- attempted password typing;
+- attempted upload of sensitive file;
+- attempted shell execution;
+- attempted action against an elevated window.
+
+### 28.4 Voice tests
+
+- partial transcript must not mutate;
+- final transcript creates task;
+- “stop” interrupts TTS;
+- stop works while executor is dragging;
+- agent TTS is not recognized as user command;
+- Bluetooth microphone/speaker latency;
+- device switching;
+- push-to-talk release;
+- expired voice confirmation;
+- changed action after spoken confirmation.
+
+---
+
+## 29. Evaluation
+
+Compare:
 
 ```text
 single-agent sequential baseline
 existing NeuralAgent loop
 dual-lobe gated mode
-dual-lobe overlapped mode
-dual-lobe with voice
-dual-lobe without voice
+dual-lobe bounded-overlap mode
+dual-lobe with deterministic verification
+dual-lobe with Verifier model
+voice-enabled mode
+voice-disabled mode
 ```
 
 Measure:
@@ -1859,253 +2174,254 @@ unauthorized side-effect rate
 verification precision
 recovery success
 duplicate side effects
-latency
-provider cost
-voice command latency
+time to first action
+time between verified actions
+provider latency
+voice latency
 barge-in latency
-user escalation rate
+cost
+escalation rate
 context size
 Strategist overhead
 ```
 
-Use task suites covering:
+Task suite:
 
 ```text
-native applications
+native controls
 browser navigation
 forms
 file operations
 window switching
-multi-monitor layouts
+multi-monitor
 DPI scaling
 custom-rendered controls
-application failures
-network failures
+application crash
+network failure
 prompt injection
 UAC/authentication
 destructive actions
 voice interruption
+post-crash reconciliation
 ```
 
-The dual-lobe research explicitly calls for empirical evaluation and ablation. Do not claim reliability improvements until these comparisons are measured.
+Do not claim improvement until these measurements exist.
+
+Release thresholds must be defined before release. The research does not provide valid thresholds, so the team must establish them from baseline measurements.
 
 ---
 
-## Known Constraints and Pitfalls
+## 30. Deployment and recovery
 
-### Repository and runtime constraints
+### 30.1 Safe mode
 
-- The repositories were inspected but not executed during the investigation.
-- Runtime behavior, Windows compatibility, latency, model quality, and end-to-end readiness are not independently confirmed.
-- NeuralAgent contains compiled artifacts and a binary-like background-agent file; readable source should be treated as authoritative.
-- The existing NeuralAgent setup is multi-process and multi-step rather than a verified one-command Windows installation.
-- The existing background mode is described as Windows-only through WSL and browser-only.
+Safe mode starts with:
 
-### Architecture constraints
+```text
+no external side effects
+no shell
+screenshots/UIA only
+human confirmation for every mutation
+```
 
-- A post-response observer cannot prevent an action that already occurred.
-- Per-run serialization does not protect a shared physical desktop from multiple concurrent runs.
-- Prompt instructions cannot replace runtime tool ownership or permit enforcement.
-- The Strategist must not be allowed to mutate the environment.
-- The Executor must not be allowed to authorize or verify its own action.
-- Shared memory must not become a bypass around the Tool Router.
-- A true zero-latency loop is impossible when fresh state, model generation, verification, or human confirmation is required.
+### 30.2 Installer
 
-### Windows automation constraints
+The installer must eventually include:
 
-- UI Automation trees are dynamic.
-- Applications expose different levels of UIA support.
-- Custom controls may have incomplete or missing providers.
-- UIA control patterns are preferable to coordinates but are not universally available.
-- Foreground-window activation on Windows has restrictions.
-- Window-title substring matching can focus the wrong window.
-- UAC and secure desktop surfaces require special handling.
-- The current fixed `1280 × 720` coordinate mapping does not explicitly solve multi-monitor, negative coordinates, or per-monitor DPI.
-- Desktop icon discovery based on `SysListView32` is brittle.
-- The current WebView detection is a heuristic and can produce false positives.
-- Screenshot and UIA coordinate systems can become inconsistent if transformations are not recorded.
+```text
+Electron application
+Python runtime/executor
+locked dependencies
+browser policy
+voice dependencies
+database migration
+artifact directories
+configuration migration
+first-run privacy controls
+crash recovery registration
+```
 
-### Input constraints
+No independently verified one-click installer or signing pipeline exists yet. These must be implemented and tested.
 
-- Unicode insertion currently relies on clipboard behavior.
-- Clipboard paste can fail or target the wrong field if focus is lost.
-- Input events may be delivered successfully even when the application does not reach the expected state.
-- Long typing and held keys require cancellation-safe cleanup.
-- Secret entry must not be treated like ordinary text input.
+### 30.3 Restart handling
 
-### Provider constraints
+On restart:
 
-- Provider-specific computer-use schemas must be normalized.
-- The existing proxy rejects image and audio content.
-- Multimodal support requires payload limits, artifact storage, redaction, hashing, and provider capability checks.
-- Different model providers may have different action ordering, tool-result, streaming, and screenshot requirements.
-- Independent verification is less effective if Strategist, Executor, and Verifier share identical failure modes; different model families or providers are preferable where feasible.
-
-### Security constraints
-
-- Screen content is untrusted and may contain prompt injection.
-- On-screen text must not grant permissions.
-- Browser and URL tools require allowlists and request limits.
-- Consequential actions require explicit confirmation.
-- Arbitrary shell execution is unsafe for the initial product.
-- Credentials, passwords, MFA prompts, and secure desktop content must not be exposed casually to remote models.
-- The agent must not bypass authentication or security prompts.
-
-### Voice constraints
-
-- Windows on-device speech APIs have documented Windows and Windows App SDK requirements for the referenced implementation.
-- Cloud speech introduces network, privacy, credential, and cost dependencies.
-- Microphone input can capture the agent’s own TTS without echo cancellation.
-- Voice stop commands must not depend on a model response.
-- Partial transcripts must not trigger mutations prematurely.
-- Voice confirmation must be bound to the exact action and expire.
-
-### Persistence constraints
-
-- An outbox or background job can be lost or delayed if the process crashes unless durable state and retry behavior are implemented.
-- A provider response is not evidence that a desktop action succeeded.
-- An action dispatched before a crash must not automatically be repeated unless idempotency is known.
-- Artifact retention and redaction policies are required but not specified by the existing repositories.
+1. restore database and checkpoints;
+2. identify pending/unknown actions;
+3. capture fresh observation;
+4. reconcile using deterministic evidence;
+5. never repeat uncertain external side effects automatically;
+6. require user resolution when ambiguity remains.
 
 ---
 
-## Open Gaps and Unknowns
+## 31. Remaining unresolved gaps
 
-### Repository and implementation unknowns
+These items cannot be resolved from the available research alone and require implementation or controlled testing.
 
-1. **Actual runtime behavior**
-   - The repositories were not started or tested on a Windows machine.
-   - End-to-end compatibility is unknown.
+### 31.1 Runtime compatibility
 
-2. **Supported Windows versions**
-   - The exact supported Windows version for the final product is not established.
-   - The Windows on-device speech API findings reference Windows 11 24H2 and specific Windows App SDK requirements, but broader compatibility is unknown.
+The referenced repositories were inspected but not executed on Windows in this research. Unverified:
 
-3. **Installer and signing**
-   - No verified one-click Windows installer was identified.
-   - No signed binary distribution process was established.
+- actual installation;
+- current build behavior;
+- provider compatibility;
+- UIA coverage on target applications;
+- Electron packaging;
+- latency and memory usage;
+- crash recovery.
 
-4. **License compatibility**
-   - The investigation did not establish a complete license compatibility analysis across all repositories and dependencies.
-   - The dual-lobe repository documentation states CC BY-NC-SA 4.0, while repository license metadata was not returned.
-   - Perform legal review before copying code or documentation into a commercial product.
+### 31.2 Exact dependency versions
 
-### Windows automation unknowns
+The research did not establish exact compatible versions for:
 
-5. **DPI and multi-monitor implementation**
-   - The research identifies the current fixed 1280×720 limitation but does not provide a tested replacement.
-   - The exact Windows API strategy for per-monitor DPI awareness and coordinate transforms must be selected and tested.
+- Electron;
+- Node.js;
+- Python;
+- React;
+- FastAPI;
+- Pydantic;
+- SQLAlchemy;
+- `uiautomation`;
+- `pywinauto`;
+- Playwright;
+- Azure Speech SDK;
+- OpenTelemetry.
 
-6. **UIA provider coverage**
-   - The percentage of target applications exposing reliable control patterns is unknown.
-   - A supported-application matrix must be created.
+Resolve these in a Windows CI environment and commit lockfiles. Do not infer versions from this document.
 
-7. **Browser adapter**
-   - The findings recommend Playwright/CDP-style browser automation, but no integrated adapter was found in the investigated dual-lobe code.
-   - Browser session persistence, profile isolation, download handling, and authentication behavior require implementation and testing.
+### 31.3 UIA application coverage
 
-8. **Secure desktop behavior**
-   - The exact detection and response behavior for UAC, Windows Hello, MFA, password dialogs, and protected desktops is not specified.
-   - The implementation must define when to pause, what evidence to show, and how the user resumes.
+No reliable percentage is known for applications exposing sufficient UIA patterns. Build a supported-application matrix before expanding scope.
 
-9. **WebView detection**
-   - Existing NeuralAgent behavior only estimates uncovered screen area.
-   - No validated WebView2, Chromium, accessibility-tree, or CDP detection strategy was found.
+### 31.4 Secure desktop detection
 
-10. **Desktop icon semantics**
-    - Existing icon extraction returns labels and bounds but does not establish a reliable shell action or stable identifier.
-    - A stable desktop-icon model is required.
+Reliable handling of UAC, Windows Hello, credential dialogs, lock screen, and RDP edge cases requires actual Windows testing.
 
-### Dual-lobe scheduling unknowns
+### 31.5 Screen redaction
 
-11. **Safe overlap boundaries**
-    - The research defines bounded overlap conceptually but does not specify which action classes can safely overlap on every application.
-    - Benchmark action categories before enabling speculative preparation or execution.
+No complete redaction mechanism has been verified. Implement defense-in-depth, but do not represent redaction as a guarantee.
 
-12. **Permit granularity**
-    - It is not established whether permits should authorize one raw input, one semantic action, one action batch, or a short sequence.
-    - The recommended starting point is one permit per mutating action, with explicit evidence requirements.
+### 31.6 Credential isolation
 
-13. **Verification authority**
-    - The final product must decide whether verification is performed by the Strategist, a separate Verifier model, deterministic adapters, or a combination.
-    - Deterministic evidence should be preferred where available.
+No complete vault or secure-entry design is established. Initial behavior must be manual user entry with model and ledger exclusion.
 
-14. **Rollback support**
-    - Many desktop actions are not safely reversible.
-    - The implementation must identify which actions support rollback and must not promise rollback where no reliable inverse exists.
+### 31.7 Voice quality
 
-15. **Idempotency**
-    - The repositories do not provide a complete idempotency model for external desktop actions.
-    - Each high-risk action must define whether retry is safe before automatic retry is allowed.
+AEC, VAD, Bluetooth latency, microphone switching, and TTS self-triggering require hardware testing.
 
-### Voice unknowns
+### 31.8 Model independence
 
-16. **Local speech availability**
-    - The findings identify Windows on-device speech APIs but do not establish availability across target devices.
-    - Test supported hardware, Windows versions, packaging modes, languages, and offline behavior.
+Separate Strategist and Verifier providers do not guarantee independent errors. Measure false-success behavior empirically.
 
-17. **Voice provider selection**
-    - The final STT and TTS provider strategy is not selected.
-    - Compare local recognition, Azure Speech SDK, and any other approved providers for latency, privacy, cost, and reliability.
+### 31.9 Artifact retention
 
-18. **Wake-word behavior**
-    - The research covers streaming recognition and interruption but does not define a wake-word system.
-    - Decide whether the MVP uses push-to-talk, always-listening, wake word, or a combination.
+Retention, encryption, deletion, backup, and export policies remain product decisions.
 
-19. **Audio privacy**
-    - Retention, transmission, and redaction policies for microphone audio are not specified.
-    - Define whether audio is stored, transmitted, or discarded after transcription.
+### 31.10 SQLite/Postgres synchronization
 
-### Security unknowns
+Local SQLite is authoritative for the MVP. Replication or server synchronization is not defined and must not be assumed safe.
 
-20. **Screen redaction**
-    - The research identifies sensitive-data exposure as a risk but does not define a complete redaction implementation.
-    - Specify detection, masking, user override, model-side handling, and artifact retention.
+### 31.11 License compatibility
 
-21. **Credential isolation**
-    - No credential-vault integration was identified.
-    - Decide how passwords, tokens, MFA codes, and private data are entered without exposing them to models.
+Verified or reported licenses include:
 
-22. **Network policy**
-    - Existing URL and PDF tools do not visibly implement complete domain, size, timeout, or content restrictions.
-    - Define network allowlists and enforce them in the runtime.
+```text
+NeuralAgent: MIT
+uiautomation: Apache 2.0
+pywinauto: BSD 3-Clause
+dual-lobe documentation: CC BY-NC-SA 4.0
+```
 
-23. **Shell policy**
-    - The final product scope does not establish whether shell execution will ever be supported.
-    - Keep it disabled for MVP and define a separate security review if added.
+FlaUI and dual-lobe-proxy license details require direct legal review before redistribution. Implement architecture independently where licensing is uncertain. Do not copy CC BY-NC-SA material into a commercial product without approval.
 
-### Persistence and deployment unknowns
+---
 
-24. **SQLite versus Postgres boundary**
-    - The findings recommend SQLite for local-first mode and Postgres for server mode, but synchronization and migration behavior are not defined.
-    - Decide whether local state is authoritative, replicated, or only cached.
+## 32. Required acceptance criteria
 
-25. **Artifact retention**
-    - Screenshot, UI tree, voice, and evidence retention periods are not specified.
-    - Define user controls, automatic deletion, encryption, and audit requirements.
+The MVP is not complete until all of the following are true:
 
-26. **Crash recovery semantics**
-    - The repositories provide checkpoint and job patterns but do not establish how to reconcile an action that may have occurred just before a crash.
-    - Implement conservative reconciliation and require user input when an external side effect is uncertain.
+### Executor
 
-27. **Multi-device behavior**
-    - Device identity and desktop-session identity are not present in the existing proxy design.
-    - Define whether runs may move between devices and how a physical desktop is reserved.
+- [ ] A screenshot includes monitor origin, dimensions, DPI metadata, coordinate-space ID, and hash.
+- [ ] Coordinate actions are rejected when the display topology changes.
+- [ ] UIA actions re-resolve the element before acting.
+- [ ] UIA actions verify the required pattern.
+- [ ] Focus-dependent actions verify foreground handle and process.
+- [ ] Application launch uses an allowlisted target, not a shell string.
+- [ ] Cancellation releases held keys and mouse buttons.
+- [ ] Clipboard state is restored in all paths.
+- [ ] Elevated/secure desktop surfaces cause pause/escalation.
 
-### Evaluation unknowns
+### Coordinator
 
-28. **Task benchmark**
-    - No standardized Windows task suite is supplied.
-    - Create a benchmark covering native UI, browser UI, custom surfaces, voice, interruptions, prompt injection, and consequential actions.
+- [ ] Only the Coordinator can issue permits.
+- [ ] Only the Coordinator writes the authoritative ledger.
+- [ ] Every mutation has pre-observation, action event, post-observation, and verification result.
+- [ ] Every permit binds action ID, argument hash, revision, and expiration.
+- [ ] One physical desktop mutation can be in flight.
+- [ ] Duplicate messages are idempotent.
+- [ ] Restart never blindly repeats an uncertain external side effect.
+- [ ] Watchdog prevents infinite loops.
 
-29. **Success definition**
-    - The research identifies metrics but does not define thresholds.
-    - Establish release criteria for task success, false success, unauthorized side effects, verification precision, recovery, and latency.
+### Safety
 
-30. **Model selection**
-    - The findings identify separate Strategist, Executor, and Verifier roles but do not prescribe specific models.
-    - Select models through controlled evaluation rather than assuming the existing provider roles are sufficient.
+- [ ] Consequential operations require exact confirmation.
+- [ ] Environment content cannot grant authorization.
+- [ ] Passwords and MFA codes are excluded from model-visible logs and artifacts.
+- [ ] Shell execution is disabled.
+- [ ] Browser profiles are isolated.
+- [ ] Prompt-injection tests pass without granting unauthorized actions.
 
-31. **Cost and latency budgets**
-    - No target budgets were established for model calls, screenshots, voice, or verification.
-    - Define budgets before enabling overlapping work so that overlap does not create uncontrolled provider cost or resource usage.
+### Voice
+
+- [ ] Push-to-talk works.
+- [ ] Partial transcripts never mutate the desktop.
+- [ ] Emergency stop bypasses the model.
+- [ ] TTS can be interrupted.
+- [ ] Confirmation is bound to an unexpired exact action.
+- [ ] Raw audio is not retained by default.
+
+### Evaluation
+
+- [ ] Baseline measurements exist.
+- [ ] Dual-lobe measurements exist.
+- [ ] False-success and unauthorized-side-effect rates are measured.
+- [ ] Post-crash reconciliation is tested.
+- [ ] Release thresholds are documented and met.
+
+---
+
+## 33. Final implementation priority
+
+Implement in this order:
+
+```text
+1. deterministic Windows executor
+2. observation and coordinate model
+3. UIA semantic references/actions
+4. SQLite ledger and checkpoints
+5. Coordinator state machine
+6. permits and human confirmation
+7. deterministic verification
+8. watchdog and recovery
+9. Strategist integration
+10. provider adapters
+11. Playwright/CDP browser layer
+12. push-to-talk voice
+13. packaging/signing
+14. optional FlaUI/UIAccess/server features
+```
+
+The fundamental rule is:
+
+```text
+No permit without current state.
+No mutation without a permit.
+No success without evidence.
+No retry after uncertainty without reconciliation.
+No environment content can authorize an action.
+```
+
+This architecture preserves the useful Electron/React and Windows automation foundations while replacing the sequential, unverified NeuralAgent loop with a durable, typed, role-isolated, permit-bound computer-use runtime.
