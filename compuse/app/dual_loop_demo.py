@@ -190,6 +190,7 @@ def run_demo(trace: Callable[[str], None] | None = None):
         trace=trace,
     )
     report = runtime.run("complete the deterministic shell demonstration", max_batches=4)
+    runtime.store.close()
     return report, adapter, lobe_a, lobe_b
 
 
@@ -207,6 +208,7 @@ def run_screen_aware_demo(trace: Callable[[str], None] | None = None):
         trace=trace,
     )
     report = runtime.run("complete the deterministic shell demonstration", max_batches=4)
+    runtime.store.close()
     return report, adapter, lobe_a, screen_lobe
 
 
