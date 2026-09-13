@@ -3,7 +3,7 @@
 import os
 from PyInstaller.utils.hooks import collect_data_files
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(SPECPATH)))
+ROOT = os.path.dirname(os.path.abspath(SPECPATH))
 datas = collect_data_files("compuse")
 
 for (name, relfile, console) in (
