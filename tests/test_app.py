@@ -200,6 +200,14 @@ def test_load_steps_validates(tmp_path):
         load_steps(str(path))
 
 
+def test_load_steps_tolerates_utf8_bom(tmp_path):
+    raw = json.dumps([{"op": "goto", "url": "https://example.com/"}]).encode("utf-8")
+    path = tmp_path / "steps.json"
+    path.write_bytes(b"\xef\xbb\xbf" + raw)
+    steps = load_steps(str(path))
+    assert len(steps) == 1 and steps[0].op == "goto"
+
+
 def test_cli_run_with_steps_file(monkeypatch, tmp_path, capsys):
     from compuse.app import cli
     path = tmp_path / "steps.json"

@@ -30,7 +30,7 @@ def _load_action(raw: str) -> dict:
         path = Path(raw[1:])
         if not path.exists():
             raise ValueError(f"action file not found: {path}")
-        raw = path.read_text(encoding="utf-8")
+        raw = path.read_text(encoding="utf-8-sig")
     try:
         return json.loads(raw)
     except json.JSONDecodeError as exc:

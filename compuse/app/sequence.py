@@ -22,7 +22,7 @@ def load_steps(path: str) -> list[WebOp]:
 
         raw = json.load(sys.stdin)
     elif not path.startswith("@"):
-        with open(path, encoding="utf-8") as fh:
+        with open(path, "r", encoding="utf-8-sig") as fh:
             raw = json.load(fh)
     else:
         from compuse.app.cli import _load_action
