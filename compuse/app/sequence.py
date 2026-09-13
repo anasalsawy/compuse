@@ -8,7 +8,7 @@ from pydantic import TypeAdapter
 from compuse.protocol import Action, WebOp
 from compuse.coordinator import Coordinator
 from compuse.storage import EventStore
-from compuse.app.browser import BrowserEngine, BrowserError
+from compuse.app.browser import BrowserEngine
 from compuse.app.workflow import run_coordinated_step
 
 Strict: TypeAdapter = TypeAdapter(list[WebOp])
@@ -54,12 +54,13 @@ def run_steps(steps: list[WebOp], *, run_id: str = "cli-run", ttl: float = 30.0,
                                             ttl=ttl, executor_fn=runner)
                 execution = step["execution"]
                 ok = bool(execution.get("performed"))
-                lines.append(f"{step['step']:>4} {str(action.op):<6} {execution.get('detail', '')}"
+                where = execution.get("url") or execution.get("detail", "")
+                lines.append(f"{step['step']:>4} {str(action.op):<6} {where}"
                              + ("" if ok else "   [not performed]"))
                 if not ok:
                     failures += 1
                 results.append(step)
-            except (BrowserError, ValueError, RuntimeError) as exc:
+            except Exception as exc:  # noqa: BLE001 - per-step isolation for the CLI user
                 failures += 1
                 lines.append(f"{revision + 1:>4} ERROR  {exc}")
                 results.append({"step": revision + 1, "execution": {"performed": False,
