@@ -1,14 +1,16 @@
 # Security boundary
 
-Compuse is a coordination prototype, not an unrestricted automation shell.
+Compuse provides authorization and audit primitives, not complete desktop security.
 
-- Provider, environment, and voice content are untrusted data.
-- Only the Coordinator may issue or consume permits.
-- Arbitrary executable paths, shell commands, credentials, MFA, secure-desktop automation, and normal browser-profile attachment are outside the contract.
-- Consuming a permit is not execution success. Future executors must report dispatch certainty and independent verification separately.
-- Unknown outcomes must enter reconciliation; they must never be blindly retried.
-- Event hash chains provide tamper evidence. They do not provide encryption, access control, or tamper prevention.
-- Do not log secrets, clipboard contents, passwords, tokens, or full text by default.
-- The current implementation keeps permit authority in process memory; it is not restart-safe.
+## Current guarantees
 
-Before a Windows release, define artifact retention, database backup/migration, secret storage, native-helper versioning, cancellation, emergency stop, code signing, and an interactive test matrix.
+- Strict typed input models reject unknown fields and bounded-value violations.
+- Untrusted content and provider output cannot authorize actions through the Coordinator.
+- Permits bind an action to a run, observation revision, coordinate space, policy revision, and deterministic action digest.
+- Event records are stored in a SQLite hash chain and can detect tampering, gaps, and reordered records.
+
+## Current limitations
+
+Permit state is process-local, the mutation boundary is process-local, and no executor or Windows identity layer exists. A permit authorizes a typed action but does not execute it or prove success. There is no durable lease, restart recovery, idempotency, native helper, UI Automation, authentication, authorization service, or protection against a separately running process.
+
+Do not treat this prototype as a security boundary for unattended desktop control. Report security issues privately to the repository owner rather than publishing exploit details first.

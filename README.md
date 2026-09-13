@@ -1,42 +1,50 @@
 # Compuse
 
-Compuse is a safety-first, local-first coordination core for a future Windows computer-use agent. This repository intentionally ships a **portable, model-free foundation**, not a complete Windows automation product.
+Compuse is a safety-first, local-first coordination core for future computer-use systems. The current release is a **portable authorization and audit prototype**: it validates typed actions, binds them to observations, issues one-use permits, and records tamper-evident events.
 
-## Current status
+It is deliberately **not** a Windows automation product. It does not launch applications, control input, implement UI Automation, or claim that an authorized action succeeded.
 
-Implemented and tested:
+## Implemented
 
-- Strict Pydantic protocol models and discriminated actions.
-- Observation-, coordinate-space-, policy-, and action-bound permit validation.
+- Strict Pydantic v2 protocol models with rejected unknown fields.
+- Discriminated typed actions and bounded input values.
+- Timezone-aware observations and action/observation binding.
+- Trusted-origin checks and policy/capability revisions.
 - Single-use, expiring permits with an in-process mutation boundary.
-- SQLite WAL event journaling with full synchronous mode and SHA-256 per-run hash chains.
-- Automated Python tests.
+- SQLite WAL event journaling with full synchronization and SHA-256 hash chains.
+- Explicit fail-closed run and action lifecycle transition tables.
+- Portable Pytest coverage for positive and negative invariants.
 
-Not implemented:
+## Explicitly out of scope
 
-- Windows native helper, UI Automation, Notepad workflow, process/window identity, session/input-desktop checks, and physical input.
-- Durable run/action/permit state, leases, restart recovery, and unknown-result reconciliation.
-- Browser, voice, provider/model, Electron, screenshot, installer, and signing integrations.
+The repository does not currently provide a native Windows helper, UI Automation, Notepad workflow, process/window/session identity checks, physical input, durable run/action/permit state, restart recovery, leases, idempotency, executor dispatch, postcondition verification, or unknown-result reconciliation. Those features require a separate design and interactive Windows acceptance tests.
 
-This is not course-scheduling software and does not implement course import, scheduling, conflict detection, or calendar export.
+This project is not course-scheduling software and does not implement course import, scheduling, conflict detection, or calendar export.
 
 ## Installation and tests
 
-Requires Python 3.11 or newer.
+Python 3.11 or newer is required:
 
-```bash
-python -m pip install -e '.[test]'
+```powershell
+python -m pip install -e ".[test]"
 python -m pytest -ra
 ```
 
-The current test suite is portable and does not prove Windows behavior.
+For coverage:
+
+```powershell
+python -m pip install coverage
+pytest --cov=compuse --cov-report=term-missing
+```
+
+The portable suite does not prove Windows behavior. Treat `Coordinator.consume()` as authorization only; it does not execute input or prove success.
 
 ## Safety boundary
 
-`Coordinator.consume()` authorizes a typed action; it does not execute input or prove success. A future Windows integration must capture post-action state, independently verify the intended result, and record failure or unknown outcomes. Do not use this prototype with production credentials or unattended desktop mutation.
+Do not connect this prototype to unattended desktop mutation or production credentials. A future Windows implementation must independently observe the target after dispatch, verify the intended postcondition, and record failed or unknown outcomes.
 
-See [`docs/supported-capabilities.md`](docs/supported-capabilities.md) for the conservative capability matrix and [`plan.md`](plan.md) for the broader design direction.
+See `docs/protocol.md`, `docs/security.md`, `docs/supported-capabilities.md`, and `docs/windows-development.md` for the documented boundaries.
 
 ## License
 
-See [`LICENSE`](LICENSE).
+See [LICENSE](LICENSE).

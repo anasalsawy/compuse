@@ -1,13 +1,20 @@
 # Supported capabilities
 
-| Capability | Status | Evidence |
-|---|---|---|
-| Strict typed protocol | Implemented | `compuse/protocol/models.py` |
-| Single-use expiring in-process permits | Implemented | `compuse/coordinator/core.py` |
-| Explicit lifecycle transition validation | Implemented | `compuse/coordinator/states.py`, `tests/test_states.py` |
-| Tamper-evident SQLite event journal | Implemented | `compuse/storage/events.py`, `tests/test_storage.py` |
-| Windows native helper/UI Automation | Not implemented | None |
-| Durable run/action/permit state and restart recovery | Not implemented | None |
-| Course scheduling/import/calendar export | Not implemented | None |
+| Capability | Status |
+|---|---|
+| Strict typed protocol models | Implemented |
+| Observation/action binding | Implemented |
+| One-use expiring in-process permits | Implemented |
+| SQLite tamper-evident event journal | Implemented |
+| Fail-closed lifecycle transition tables | Implemented |
+| Windows native helper | Not implemented |
+| UI Automation | Not implemented |
+| Notepad vertical slice | Not implemented |
+| Process/window/session identity | Not implemented |
+| Durable coordinator state and leases | Not implemented |
+| Restart recovery and idempotency | Not implemented |
+| Executor dispatch and postcondition verification | Not implemented |
+| Browser, voice, provider/model, Electron, screenshots, installer | Not implemented |
+| Course import, scheduling, conflict detection, calendar export | Out of scope |
 
-Implemented entries describe the portable foundation only; they do not imply desktop execution or success verification.
+“Implemented” means covered by the portable Python test suite; it does not imply Windows integration or unattended desktop safety.

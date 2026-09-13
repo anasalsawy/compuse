@@ -1,9 +1,7 @@
 # Windows development
 
-Windows functionality is planned but not present in this repository.
+The current package is portable Python and has no native Windows helper. Windows-specific behavior is therefore **not implemented or verified**.
 
-The first native milestone is a model-free Notepad vertical slice: approved logical launch, process/window identity, UI Automation observation, exact text-control resolution, semantic `ValuePattern` assignment, post-action verification, cancellation, and fail-closed recovery.
+When native work begins, tests must run on an unlocked interactive Windows desktop and must report the Windows build, Python version, helper version, session, input desktop, foreground window, and process identity. CI on non-Windows hosts must not be presented as evidence of desktop safety.
 
-A future implementation must choose a native-helper language and typed IPC protocol before adding native code. It must be tested on an unlocked interactive Windows desktop. Headless Linux CI and fake executors cannot prove UI Automation, input-desktop identity, DPI behavior, or Notepad behavior.
-
-Do not add arbitrary shell execution or arbitrary executable paths as a shortcut to the native boundary.
+Until that work exists, do not use this prototype for unattended desktop mutation, production credentials, or safety-critical workflows.
