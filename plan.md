@@ -1,3 +1,6 @@
+
+INSTRUCTIONS FOR BUILDERS >> PLEASE COMPLETE THIS TURNING IT INTO A TESTED AND VERIFIED READY TO INSTALL WINDOWS APP
+
 # Implementation Research Report: `anasalsawy/compuse`
 
 ## 1. Task interpretation and exact requirements
