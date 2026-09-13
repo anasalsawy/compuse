@@ -25,6 +25,24 @@ class RiskClass(StrEnum):
     BARRIER = "barrier"
 
 
+class LobeBProfile(StrEnum):
+    """Manually selected B behavior layered on top of its core duties."""
+
+    BASE = "base"
+    PREDICTIVE = "predictive"
+    SCREEN_AWARE = "screen-aware"
+    GATEKEEPER = "gatekeeper"
+    RECOVERY = "recovery"
+
+
+class DeceptionGrade(StrEnum):
+    """B's claim-review color; GREEN means no deception detected."""
+
+    GREEN = "green"
+    YELLOW = "yellow"
+    RED = "red"
+
+
 class RuntimeObservation(ContractModel):
     """A model-facing observation; screenshot bytes stay outside the journal."""
 
@@ -140,6 +158,20 @@ class BatchSpec(ContractModel):
         return self
 
 
+class BCoreReview(ContractModel):
+    """Always-on context broadening and anti-deception output from B."""
+
+    profile: LobeBProfile
+    context_notes: tuple[str, ...] = Field(default=(), max_length=32)
+    missing_prerequisites: tuple[str, ...] = Field(default=(), max_length=32)
+    failure_modes: tuple[str, ...] = Field(default=(), max_length=32)
+    unasked_questions: tuple[str, ...] = Field(default=(), max_length=32)
+    claim_findings: tuple[str, ...] = Field(default=(), max_length=32)
+    deception_grade: DeceptionGrade = DeceptionGrade.GREEN
+    proof_required: tuple[str, ...] = Field(default=(), max_length=32)
+    summary: str = Field(min_length=1, max_length=2000)
+
+
 class LobeDecision(ContractModel):
     """Lobe B's compact oversight decision for the next batch."""
 
@@ -147,6 +179,7 @@ class LobeDecision(ContractModel):
     batch: BatchSpec | None = None
     reason: str = Field(min_length=1, max_length=2000)
     corrections: tuple[str, ...] = Field(default=(), max_length=32)
+    core_review: BCoreReview | None = None
 
     @model_validator(mode="after")
     def approved_requires_batch(self) -> "LobeDecision":

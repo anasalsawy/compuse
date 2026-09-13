@@ -66,6 +66,17 @@ The screen-aware mode intentionally limits B to one in-flight vision
 assessment while capture continues. Sending every captured frame to a model
 would create a queue and increase latency instead of improving awareness.
 
+All live modes include B's context-broadening and anti-deception core. Choose
+the additional B profile manually; it remains fixed for the run:
+
+```powershell
+compuse-agent "Open Chrome and navigate to example.com" --architecture screen-aware --lobe-b-profile gatekeeper --live --trace
+```
+
+Available profiles are `base`, `predictive`, `screen-aware`, `gatekeeper`, and
+`recovery`. `gatekeeper` rejects a handoff whenever B reports a non-GREEN
+deception grade or requires proof.
+
 ## Portable core
 
 The original coordination core remains available and provides:

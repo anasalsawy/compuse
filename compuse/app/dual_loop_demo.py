@@ -8,8 +8,11 @@ from datetime import datetime, timezone
 from typing import Callable
 
 from compuse.agent.contracts import (
+    BCoreReview,
     BatchPreconditions,
     BatchSpec,
+    DeceptionGrade,
+    LobeBProfile,
     LobeDecision,
     PredictedState,
     RuntimeObservation,
@@ -158,10 +161,22 @@ class DemoLobeA:
 
 
 class DemoLobeB:
-    def __init__(self, adapter: DemoAdapter) -> None:
+    def __init__(self, adapter: DemoAdapter, profile: LobeBProfile | str = LobeBProfile.BASE) -> None:
         self.adapter = adapter
+        self.profile = LobeBProfile(profile)
         self.prepare_started_during_execution = False
         self.saw_predicted_end = False
+        self.core_reviews = 0
+
+    def _core_review(self) -> BCoreReview:
+        self.core_reviews += 1
+        return BCoreReview(
+            profile=self.profile,
+            context_notes=("verify the next visible state anchor",),
+            failure_modes=("the foreground application could change",),
+            deception_grade=DeceptionGrade.GREEN,
+            summary="deterministic demo core review; no deception detected",
+        )
 
     def prepare_next(self, task: str, active_batch: BatchSpec, observation: RuntimeObservation) -> LobeDecision:
         # Make the demo's overlap assertion deterministic across Python
@@ -175,7 +190,11 @@ class DemoLobeB:
         marker = active_batch.predicted_end.required_markers[0]
         step = self.adapter.step_for(marker)
         if step is None:
-            return LobeDecision(approved=False, reason="terminal batch; no next handoff")
+            return LobeDecision(
+                approved=False,
+                reason="terminal batch; no next handoff",
+                core_review=self._core_review(),
+            )
         end_marker, action_count = step
         return LobeDecision(
             approved=True,
@@ -189,17 +208,20 @@ class DemoLobeB:
                 action_count,
                 terminal=end_marker == "done",
             ),
+            core_review=self._core_review(),
         )
 
 
 class ScreenDemoLobeB:
     """Deterministic screen watchdog used to prove the second architecture."""
 
-    def __init__(self) -> None:
+    def __init__(self, profile: LobeBProfile | str = LobeBProfile.BASE) -> None:
+        self.profile = LobeBProfile(profile)
         self.screen_updates = 0
         self.screen_assessments = 0
         self.handoff_checks = 0
         self.saw_expected_transition = False
+        self.core_reviews = 0
 
     def inspect_screen(
         self,
@@ -233,15 +255,25 @@ class ScreenDemoLobeB:
         assessment: ScreenAssessment,
     ) -> LobeDecision:
         self.handoff_checks += 1
+        self.core_reviews += 1
+        core_review = BCoreReview(
+            profile=self.profile,
+            context_notes=("verify the next visible state anchor",),
+            failure_modes=("the foreground application could change",),
+            deception_grade=DeceptionGrade.GREEN,
+            summary="deterministic screen-aware core review; no deception detected",
+        )
         if assessment.status == "stable" and candidate.preconditions.matches(observation):
             return LobeDecision(
                 approved=True,
                 reason="screen state is stable and A's candidate matches the fresh observation",
                 batch=candidate,
+                core_review=core_review,
             )
         return LobeDecision(
             approved=False,
             reason="screen-aware gate rejected an unstable or stale candidate",
+            core_review=core_review,
         )
 
 
@@ -260,10 +292,14 @@ def run_control_demo(trace: Callable[[str], None] | None = None, scenario: str =
     return report, adapter, lobe_a, None
 
 
-def run_demo(trace: Callable[[str], None] | None = None, scenario: str = "simple"):
+def run_demo(
+    trace: Callable[[str], None] | None = None,
+    scenario: str = "simple",
+    profile: LobeBProfile | str = LobeBProfile.BASE,
+):
     adapter = DemoAdapter(scenario)
     lobe_a = DemoLobeA(adapter)
-    lobe_b = DemoLobeB(adapter)
+    lobe_b = DemoLobeB(adapter, profile)
     runtime = DualLobeRuntime(
         adapter=adapter,
         lobe_a=lobe_a,
@@ -277,10 +313,14 @@ def run_demo(trace: Callable[[str], None] | None = None, scenario: str = "simple
     return report, adapter, lobe_a, lobe_b
 
 
-def run_screen_aware_demo(trace: Callable[[str], None] | None = None, scenario: str = "simple"):
+def run_screen_aware_demo(
+    trace: Callable[[str], None] | None = None,
+    scenario: str = "simple",
+    profile: LobeBProfile | str = LobeBProfile.BASE,
+):
     adapter = DemoAdapter(scenario)
     lobe_a = DemoLobeA(adapter)
-    screen_lobe = ScreenDemoLobeB()
+    screen_lobe = ScreenDemoLobeB(profile)
     runtime = ScreenAwareDualLobeRuntime(
         adapter=adapter,
         lobe_a=lobe_a,
@@ -308,6 +348,8 @@ def _print_proof(label: str, report, adapter: DemoAdapter, lobe_a: DemoLobeA, lo
         print("CONTROL_BASELINE=PASS" if passed else "CONTROL_BASELINE=FAIL", flush=True)
         return passed
     if isinstance(lobe_b, DemoLobeB):
+        print(f"B_profile={lobe_b.profile.value}", flush=True)
+        print(f"B_core_reviews={lobe_b.core_reviews}", flush=True)
         print(f"B_preparation_started_during_execution={lobe_b.prepare_started_during_execution}", flush=True)
         print(f"B_saw_A_predicted_end={lobe_b.saw_predicted_end}", flush=True)
         passed = (
@@ -315,8 +357,11 @@ def _print_proof(label: str, report, adapter: DemoAdapter, lobe_a: DemoLobeA, lo
             and lobe_a.prediction_started_during_execution
             and lobe_b.prepare_started_during_execution
             and lobe_b.saw_predicted_end
+            and lobe_b.core_reviews > 0
         )
     else:
+        print(f"B_profile={lobe_b.profile.value}", flush=True)
+        print(f"B_core_reviews={lobe_b.core_reviews}", flush=True)
         print(f"B_screen_updates={lobe_b.screen_updates}", flush=True)
         print(f"B_screen_assessments={lobe_b.screen_assessments}", flush=True)
         print(f"B_handoff_checks={lobe_b.handoff_checks}", flush=True)
@@ -328,6 +373,7 @@ def _print_proof(label: str, report, adapter: DemoAdapter, lobe_a: DemoLobeA, lo
             and lobe_b.screen_assessments > 0
             and lobe_b.handoff_checks > 0
             and lobe_b.saw_expected_transition
+            and lobe_b.core_reviews > 0
         )
     print("CONTINUOUS_HANDOFF=PASS" if passed else "CONTINUOUS_HANDOFF=FAIL", flush=True)
     return passed
@@ -350,11 +396,23 @@ def main(argv: list[str] | None = None) -> int:
         default="complex",
         help="deterministic task length (default: complex)",
     )
+    parser.add_argument(
+        "--lobe-b-profile",
+        choices=tuple(profile.value for profile in LobeBProfile),
+        default=LobeBProfile.BASE.value,
+        help="manually selected B profile shown in the shell proof",
+    )
     args = parser.parse_args(argv)
     runners = {
         "control": ("control", lambda trace: run_control_demo(trace=trace, scenario=args.scenario)),
-        "predictive": ("predictive", lambda trace: run_demo(trace=trace, scenario=args.scenario)),
-        "screen-aware": ("screen-aware", lambda trace: run_screen_aware_demo(trace=trace, scenario=args.scenario)),
+        "predictive": (
+            "predictive",
+            lambda trace: run_demo(trace=trace, scenario=args.scenario, profile=args.lobe_b_profile),
+        ),
+        "screen-aware": (
+            "screen-aware",
+            lambda trace: run_screen_aware_demo(trace=trace, scenario=args.scenario, profile=args.lobe_b_profile),
+        ),
     }
     selected = list(runners) if args.architecture == "compare" else [args.architecture]
     passed_all = True

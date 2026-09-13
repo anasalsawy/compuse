@@ -32,6 +32,20 @@ observation boundary, but has no overlap. Lobe A plans the next batch only
 after the current batch finishes and the desktop has been observed. Its trace
 shows the planning gap that the dual-lobe modes are intended to hide.
 
+### Always-on B core and manual profiles
+
+Every model-backed B decision carries a structured core review. The core
+broadens context with missing prerequisites, failure modes, unasked questions,
+and useful notes, then grades claims for deception. `GREEN` means no deception
+was detected; it is not a guarantee of truth. Claims about created or changed
+artifacts require the full artifact as proof, not only a manifest or summary.
+
+The operator selects one additional profile before the run: `base`,
+`predictive`, `screen-aware`, `gatekeeper`, or `recovery`. The selected profile
+does not change automatically. The `gatekeeper` profile is enforced by the
+runtime and rejects a decision whenever B reports missing proof or a non-GREEN
+grade.
+
 ### Predictive handoff
 
 ```mermaid

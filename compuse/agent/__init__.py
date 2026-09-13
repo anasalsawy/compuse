@@ -2,9 +2,12 @@
 
 from .contracts import (
     ActionExecution,
+    BCoreReview,
     BatchExecution,
     BatchPreconditions,
     BatchSpec,
+    DeceptionGrade,
+    LobeBProfile,
     LobeDecision,
     PredictedState,
     RiskClass,
@@ -25,12 +28,15 @@ from .runtime import (
 
 __all__ = [
     "ActionExecution",
+    "BCoreReview",
     "BatchExecution",
     "BatchPreconditions",
     "BatchSpec",
+    "DeceptionGrade",
     "DesktopAdapter",
     "DualLobeRuntime",
     "LobeA",
+    "LobeBProfile",
     "LobeB",
     "LobeDecision",
     "PredictedState",

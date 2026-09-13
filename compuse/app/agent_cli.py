@@ -6,8 +6,8 @@ import json
 import sys
 from typing import Sequence
 
-from compuse.agent import DualLobeRuntime, ScreenAwareDualLobeRuntime
-from compuse.agent.llm import ModelError, ModelLobeA, ModelLobeB, ModelScreenLobeB, OpenAICompatibleClient
+from compuse.agent import DualLobeRuntime, LobeBProfile, ScreenAwareDualLobeRuntime
+from compuse.agent.llm import DynamicModelLobeB, ModelError, ModelLobeA, OpenAICompatibleClient
 from compuse.app.desktop import DesktopAdapter, DesktopSafetyError
 
 
@@ -27,6 +27,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("predictive", "screen-aware"),
         default="predictive",
         help="predictive B handoff or continuous screen-aware B watchdog",
+    )
+    parser.add_argument(
+        "--lobe-b-profile",
+        choices=tuple(profile.value for profile in LobeBProfile),
+        default=LobeBProfile.BASE.value,
+        help="manually selected B profile; context and anti-deception core is always on",
     )
     parser.add_argument(
         "--screen-poll-interval",
@@ -60,12 +66,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         adapter = DesktopAdapter(live=args.live, launch_allowlist=args.allow_launch)
         lobe_a = ModelLobeA(client)
+        lobe_b = DynamicModelLobeB(client, profile=args.lobe_b_profile)
         trace = (lambda line: print(line, flush=True)) if args.trace else None
         if args.architecture == "predictive":
             runtime = DualLobeRuntime(
                 adapter=adapter,
                 lobe_a=lobe_a,
-                lobe_b=ModelLobeB(client),
+                lobe_b=lobe_b,
                 run_id=args.run_id,
                 journal_path=args.journal,
                 max_actions_per_batch=args.max_actions_per_batch,
@@ -75,7 +82,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             runtime = ScreenAwareDualLobeRuntime(
                 adapter=adapter,
                 lobe_a=lobe_a,
-                screen_lobe=ModelScreenLobeB(client),
+                screen_lobe=lobe_b,
                 run_id=args.run_id,
                 journal_path=args.journal,
                 max_actions_per_batch=args.max_actions_per_batch,

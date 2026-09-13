@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+import json
 import threading
 import time
 from datetime import datetime, timezone
 
 from compuse.agent.contracts import (
+    BCoreReview,
     BatchPreconditions,
     BatchSpec,
+    DeceptionGrade,
+    LobeBProfile,
     LobeDecision,
     PredictedState,
     RuntimeObservation,
 )
+from compuse.agent.llm import DynamicModelLobeB
 from compuse.agent.runtime import DualLobeRuntime
 from compuse.app.dual_loop_demo import run_control_demo, run_demo, run_screen_aware_demo
 from compuse.protocol import Wait
@@ -180,8 +185,14 @@ def test_screen_aware_demo_runs_continuous_watchdog_and_handoff():
 
 def test_complex_demo_compares_control_and_both_dual_lobes():
     control_report, control_adapter, control_a, _ = run_control_demo(scenario="complex")
-    predictive_report, predictive_adapter, predictive_a, predictive_b = run_demo(scenario="complex")
-    screen_report, screen_adapter, screen_a, screen_b = run_screen_aware_demo(scenario="complex")
+    predictive_report, predictive_adapter, predictive_a, predictive_b = run_demo(
+        scenario="complex",
+        profile="gatekeeper",
+    )
+    screen_report, screen_adapter, screen_a, screen_b = run_screen_aware_demo(
+        scenario="complex",
+        profile="screen-aware",
+    )
 
     for report, adapter in (
         (control_report, control_adapter),
@@ -196,5 +207,57 @@ def test_complex_demo_compares_control_and_both_dual_lobes():
     assert control_a.prediction_started_during_execution is False
     assert predictive_a.prediction_started_during_execution is True
     assert predictive_b.prepare_started_during_execution is True
+    assert predictive_b.profile == LobeBProfile.GATEKEEPER
     assert screen_a.prediction_started_during_execution is True
     assert screen_b.screen_assessments > 0
+    assert screen_b.profile == LobeBProfile.SCREEN_AWARE
+
+
+def test_manual_b_profile_keeps_core_review_and_gatekeeper_is_hard_gate():
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+
+        def complete_json(self, **kwargs):
+            self.calls.append(kwargs)
+            return {
+                "approved": True,
+                "batch": batch("b-next", "active", "next", "done", "B", terminal=True).model_dump(mode="json"),
+                "reason": "candidate is grounded",
+                "corrections": [],
+                "core_review": {
+                    "profile": "base",
+                    "context_notes": ["check the next anchor"],
+                    "missing_prerequisites": [],
+                    "failure_modes": ["focus could change"],
+                    "unasked_questions": ["is the target window still foregrounded?"],
+                    "claim_findings": [],
+                    "deception_grade": "green",
+                    "proof_required": [],
+                    "summary": "no deception detected; verify the fresh screen",
+                },
+            }
+
+    client = FakeClient()
+    lobe_b = DynamicModelLobeB(client, profile=LobeBProfile.GATEKEEPER)
+    decision = lobe_b.prepare_next("complete the demo", batch("active", None, "home", "next", "A"), observation(1, ("home",)))
+
+    assert decision.core_review is not None
+    assert decision.core_review.profile == LobeBProfile.GATEKEEPER
+    assert decision.core_review.context_notes == ("check the next anchor",)
+    assert json.loads(client.calls[0]["user_text"])["manual_b_profile"] == "gatekeeper"
+
+    blocked = DualLobeRuntime._enforce_core_policy(
+        decision.model_copy(
+            update={
+                "core_review": BCoreReview(
+                    profile=LobeBProfile.GATEKEEPER,
+                    deception_grade=DeceptionGrade.YELLOW,
+                    proof_required=("full artifact",),
+                    summary="proof is missing",
+                )
+            }
+        )
+    )
+    assert blocked.approved is False
+    assert blocked.batch is None

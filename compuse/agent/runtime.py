@@ -14,8 +14,11 @@ from compuse.storage import EventStore
 
 from .contracts import (
     ActionExecution,
+    BCoreReview,
     BatchExecution,
     BatchSpec,
+    DeceptionGrade,
+    LobeBProfile,
     LobeDecision,
     RuntimeObservation,
     RuntimeReport,
@@ -111,6 +114,8 @@ class DualLobeRuntime:
         self.trace = trace
         self._trace_started_at = time.perf_counter()
         self._observation_lock = Lock()
+        self._b_context_lock = Lock()
+        self._b_context_notes: tuple[str, ...] = ()
         self.store = EventStore(journal_path if journal_path else ":memory:")
         self.coordinator = Coordinator(store=self.store)
 
@@ -135,6 +140,63 @@ class DualLobeRuntime:
 
     def _append(self, event_type: str, payload: dict[str, Any]) -> None:
         self.store.append(self.run_id, event_type, payload, datetime.now(timezone.utc).isoformat())
+
+    def _planner_task(self, task: str) -> str:
+        """Add B's prior internal notes to A/B without changing user text."""
+        with self._b_context_lock:
+            notes = self._b_context_notes
+        if not notes:
+            return task
+        joined = "\n".join(f"- {note}" for note in notes)
+        return f"{task}\n\n[Internal Lobe B context; do not expose verbatim]\n{joined}"
+
+    def _record_core_review(self, source_batch_id: str, review: BCoreReview | None) -> None:
+        if review is None:
+            return
+        payload = review.model_dump(mode="json")
+        payload["source_batch_id"] = source_batch_id
+        self._append("b_core_review", payload)
+        notes = (
+            review.context_notes
+            + review.missing_prerequisites
+            + review.failure_modes
+            + review.unasked_questions
+            + review.claim_findings
+            + review.proof_required
+        )
+        if notes:
+            with self._b_context_lock:
+                self._b_context_notes = tuple((self._b_context_notes + notes)[-16:])
+        self._trace(
+            "B",
+            state="CORE_REVIEW",
+            source=source_batch_id,
+            profile=review.profile.value,
+            grade=review.deception_grade.value,
+            context_notes=len(review.context_notes),
+            proof_required=len(review.proof_required),
+        )
+
+    @staticmethod
+    def _enforce_core_policy(decision: LobeDecision) -> LobeDecision:
+        """Make the manually selected gatekeeper profile deterministic."""
+        review = decision.core_review
+        if review is None or review.profile != LobeBProfile.GATEKEEPER:
+            return decision
+        if review.deception_grade == DeceptionGrade.GREEN and not review.proof_required:
+            return decision
+        reasons: list[str] = []
+        if review.deception_grade != DeceptionGrade.GREEN:
+            reasons.append(f"deception grade is {review.deception_grade.value}")
+        if review.proof_required:
+            reasons.append("proof is required before approval")
+        return decision.model_copy(
+            update={
+                "approved": False,
+                "batch": None,
+                "reason": "gatekeeper rejected: " + "; ".join(reasons),
+            }
+        )
 
     def _execute_batch(
         self,
@@ -315,16 +377,17 @@ class DualLobeRuntime:
                 discarded += 1
                 transcript.append(f"discard {active.batch_id}: actual state no longer matches its preconditions")
                 self._append("batch_discarded", {"batch_id": active.batch_id, "reason": "stale_before_execution"})
-                active = self.lobe_a.plan_initial(task, observation)
+                active = self.lobe_a.plan_initial(self._planner_task(task), observation)
                 if active is None:
                     break
             transcript.append(f"execute {active.batch_id}: {len(active.actions)} action(s)")
             self._trace("LOOP", state="ACTIVE", batch=active.batch_id, actions=len(active.actions))
+            planner_task = self._planner_task(task)
 
             def predict_next() -> BatchSpec | None:
                 self._trace("A", state="PREDICT_START", source=active.batch_id)
                 try:
-                    candidate = self.lobe_a.predict_next(task, active, observation)
+                    candidate = self.lobe_a.predict_next(planner_task, active, observation)
                 except Exception as exc:
                     self._trace("A", state="PREDICT_ERROR", source=active.batch_id, error=type(exc).__name__)
                     raise
@@ -334,10 +397,12 @@ class DualLobeRuntime:
             def prepare_next() -> LobeDecision:
                 self._trace("B", state="PREPARE_START", source=active.batch_id, predicted_end=active.predicted_end.summary)
                 try:
-                    decision = self.lobe_b.prepare_next(task, active, observation)
+                    decision = self.lobe_b.prepare_next(planner_task, active, observation)
                 except Exception as exc:
                     self._trace("B", state="PREPARE_ERROR", source=active.batch_id, error=type(exc).__name__)
                     raise
+                decision = self._enforce_core_policy(decision)
+                self._record_core_review(active.batch_id, decision.core_review)
                 self._trace(
                     "B",
                     state="APPROVED" if decision.approved else "REJECTED",
@@ -374,7 +439,7 @@ class DualLobeRuntime:
                     "a_candidate": a_candidate.batch_id if a_candidate else None,
                     "b_candidate": b_decision.batch.batch_id if b_decision.batch else None,
                 })
-                active = self.lobe_a.plan_initial(task, observation)
+                active = self.lobe_a.plan_initial(self._planner_task(task), observation)
                 if active is None:
                     break
                 discarded += 1
@@ -395,7 +460,7 @@ class DualLobeRuntime:
                     "source_batch_id": active.batch_id,
                     "reason": b_decision.reason,
                 })
-                active = self.lobe_a.plan_initial(task, observation)
+                active = self.lobe_a.plan_initial(self._planner_task(task), observation)
             else:
                 # B's batch is planned from the predicted end of A's current
                 # batch, but it can run only if the real observation matches.
@@ -407,7 +472,7 @@ class DualLobeRuntime:
                         "source_batch_id": active.batch_id,
                         "reason": "predicted_end_mismatch",
                     })
-                    active = self.lobe_a.plan_initial(task, observation)
+                    active = self.lobe_a.plan_initial(self._planner_task(task), observation)
                 else:
                     active = b_candidate
                     self._trace("HANDOFF", state="ACCEPTED", batch=active.batch_id, source=b_candidate.preconditions.source_batch_id)
@@ -738,17 +803,18 @@ class ScreenAwareDualLobeRuntime(DualLobeRuntime):
                     discarded += 1
                     transcript.append(f"discard {active.batch_id}: actual state no longer matches its preconditions")
                     self._append("batch_discarded", {"batch_id": active.batch_id, "reason": "stale_before_execution"})
-                    active = self.lobe_a.plan_initial(task, observation)
+                    active = self.lobe_a.plan_initial(self._planner_task(task), observation)
                     if active is None:
                         break
                     continue
 
                 transcript.append(f"execute {active.batch_id}: {len(active.actions)} action(s)")
                 self._trace("LOOP", state="ACTIVE", batch=active.batch_id, actions=len(active.actions))
+                planner_task = self._planner_task(task)
 
                 def predict_next() -> BatchSpec | None:
                     self._trace("A", state="PREDICT_START", source=active.batch_id)
-                    candidate = self.lobe_a.predict_next(task, active, observation)
+                    candidate = self.lobe_a.predict_next(planner_task, active, observation)
                     self._trace("A", state="PREDICT_DONE", source=active.batch_id, batch=candidate.batch_id if candidate else "none")
                     return candidate
 
@@ -781,7 +847,7 @@ class ScreenAwareDualLobeRuntime(DualLobeRuntime):
                 if not execution.ok or execution.uncertain:
                     transcript.append(f"recovery after {active.batch_id}: {execution.error or 'verification failed'}")
                     self._append("speculation_invalidated", {"batch_id": active.batch_id, "reason": execution.error or "execution_not_verified"})
-                    active = self.lobe_a.plan_initial(task, observation)
+                    active = self.lobe_a.plan_initial(self._planner_task(task), observation)
                     if active is None:
                         break
                     discarded += 1
@@ -796,7 +862,7 @@ class ScreenAwareDualLobeRuntime(DualLobeRuntime):
                     discarded += 1
                     transcript.append(f"discard speculative handoff after {active.batch_id}: A candidate failed contract")
                     self._append("batch_discarded", {"batch_id": a_candidate.batch_id if a_candidate else None, "source_batch_id": active.batch_id, "reason": "candidate_contract_failed"})
-                    active = self.lobe_a.plan_initial(task, observation)
+                    active = self.lobe_a.plan_initial(self._planner_task(task), observation)
                     if active is None:
                         break
                     continue
@@ -804,7 +870,7 @@ class ScreenAwareDualLobeRuntime(DualLobeRuntime):
                 _, latest_assessment = state.snapshot()
                 assessment = latest_assessment
                 if assessment is None or assessment.observation_revision < observation.revision:
-                    assessment = self.screen_lobe.inspect_screen(task, active, observation)
+                    assessment = self.screen_lobe.inspect_screen(planner_task, active, observation)
                     with state.lock:
                         state.latest_assessment = assessment
                     self._trace(
@@ -814,7 +880,9 @@ class ScreenAwareDualLobeRuntime(DualLobeRuntime):
                         revision=assessment.observation_revision,
                     )
                 self._trace("B", state="HANDOFF_CHECK", status=assessment.status, revision=assessment.observation_revision)
-                decision = self.screen_lobe.approve_next(task, active, a_candidate, observation, assessment)
+                decision = self.screen_lobe.approve_next(planner_task, active, a_candidate, observation, assessment)
+                decision = self._enforce_core_policy(decision)
+                self._record_core_review(active.batch_id, decision.core_review)
                 if (
                     decision.approved
                     and decision.batch is not None
@@ -828,7 +896,7 @@ class ScreenAwareDualLobeRuntime(DualLobeRuntime):
                     discarded += 1
                     transcript.append(f"discard screen-aware handoff after {active.batch_id}: {decision.reason}")
                     self._append("batch_discarded", {"batch_id": a_candidate.batch_id, "source_batch_id": active.batch_id, "reason": decision.reason})
-                    active = self.lobe_a.plan_initial(task, observation)
+                    active = self.lobe_a.plan_initial(self._planner_task(task), observation)
                     if active is None:
                         break
         finally:

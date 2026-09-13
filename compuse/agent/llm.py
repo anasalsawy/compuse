@@ -13,7 +13,15 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from .contracts import BatchSpec, LobeDecision, RuntimeObservation, ScreenAssessment
+from .contracts import (
+    BCoreReview,
+    BatchSpec,
+    DeceptionGrade,
+    LobeBProfile,
+    LobeDecision,
+    RuntimeObservation,
+    ScreenAssessment,
+)
 
 
 class ModelError(RuntimeError):
@@ -98,14 +106,22 @@ source_lobe must be \"A\". Do not invent that an action succeeded; the runtime
 will observe the real desktop after dispatch."""
 
 _B_SYSTEM = """You are Lobe B, Compuse's live shadow lobe and handoff gate.
-Return JSON only. You receive Lobe A's exact current action batch and its
-predicted end state. Independently prepare the next bounded typed-action batch
-starting from that predicted end. The next batch's preconditions.source_batch_id
-must equal the active batch_id, and its preconditions must preserve the
-predicted end's checkable anchors. Reject the handoff if the predicted state is
-not concrete, the next action is not grounded, or the sequence crosses an
-uncertain transition. Use approved=false and batch=null when rejecting.
-source_lobe must be \"B\". B is allowed to challenge A; never approve a guess."""
+Return JSON only with approved, batch, reason, corrections, and core_review.
+You receive Lobe A's exact current action batch and its predicted end state.
+Independently prepare the next bounded typed-action batch starting from that
+predicted end. The next batch's preconditions.source_batch_id must equal the
+active batch_id, and its preconditions must preserve the predicted end's
+checkable anchors. Reject the handoff if the predicted state is not concrete,
+the next action is not grounded, or the sequence crosses an uncertain
+transition. Use approved=false and batch=null when rejecting. source_lobe must
+be \"B\". B is allowed to challenge A; never approve a guess.
+
+core_review is mandatory and is B's always-on foundation. It must broaden the
+context with useful notes, missing prerequisites, failure modes, and unasked
+questions. It must also review claims: GREEN means no deception detected, not
+guaranteed truth. If a claim says an action created, changed, or completed an
+artifact, proof_required must request the full artifact, not only a manifest or
+summary. Keep core_review concise and evidence-based."""
 
 _SCREEN_SYSTEM = """You are Lobe B in Compuse's continuous screen-awareness mode.
 Return JSON only with observation_revision, status, and reason. Inspect the
@@ -120,16 +136,41 @@ Compuse. Return JSON only matching LobeDecision. Review A's exact proposed next
 batch against the freshly observed screen and B's assessment. Approve only if
 the screen is stable, the candidate's source_batch_id is exact, and its
 preconditions are grounded in the observation. If approved, return the exact
-candidate batch unchanged. Reject uncertainty or any mismatch."""
+candidate batch unchanged. Reject uncertainty or any mismatch. Include the
+mandatory core_review described by the B profile instructions."""
 
 
-def _batch_prompt(task: str, observation: RuntimeObservation, active: BatchSpec | None = None) -> str:
+_PROFILE_INSTRUCTIONS = {
+    LobeBProfile.BASE: "Apply only the always-on context and anti-deception core in addition to the runtime handoff contract.",
+    LobeBProfile.PREDICTIVE: "Emphasize preparing the next bounded batch from A's predicted endpoint while preserving the always-on core.",
+    LobeBProfile.SCREEN_AWARE: "Emphasize screen-grounded reasoning and visible transitions while preserving the always-on core.",
+    LobeBProfile.GATEKEEPER: "Treat proof as a hard gate: reject any approval when core_review has proof_required entries or a non-GREEN deception grade.",
+    LobeBProfile.RECOVERY: "Emphasize failure diagnosis, safe recovery prerequisites, and what must be re-observed before continuing.",
+}
+
+
+def _batch_prompt(
+    task: str,
+    observation: RuntimeObservation,
+    active: BatchSpec | None = None,
+    *,
+    profile: LobeBProfile | None = None,
+) -> str:
     payload: dict[str, Any] = {
         "task": task,
         "observation": observation.model_dump(mode="json", exclude={"screenshot_data_url"}),
     }
     if active is not None:
         payload["active_batch"] = active.model_dump(mode="json")
+    if profile is not None:
+        payload["manual_b_profile"] = profile.value
+        payload["profile_instruction"] = _PROFILE_INSTRUCTIONS[profile]
+        payload["always_on_core"] = {
+            "context_broadening": True,
+            "anti_deception_review": True,
+            "green_definition": "no deception detected; not guaranteed truth",
+            "artifact_claim_policy": "request the full artifact every time, never only a manifest or summary",
+        }
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
@@ -140,6 +181,7 @@ def _screen_prompt(
     *,
     candidate: BatchSpec | None = None,
     assessment: ScreenAssessment | None = None,
+    profile: LobeBProfile | None = None,
 ) -> str:
     payload: dict[str, Any] = {
         "task": task,
@@ -150,6 +192,15 @@ def _screen_prompt(
         payload["candidate_next_batch"] = candidate.model_dump(mode="json")
     if assessment is not None:
         payload["screen_assessment"] = assessment.model_dump(mode="json")
+    if profile is not None:
+        payload["manual_b_profile"] = profile.value
+        payload["profile_instruction"] = _PROFILE_INSTRUCTIONS[profile]
+        payload["always_on_core"] = {
+            "context_broadening": True,
+            "anti_deception_review": True,
+            "green_definition": "no deception detected; not guaranteed truth",
+            "artifact_claim_policy": "request the full artifact every time, never only a manifest or summary",
+        }
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
@@ -176,19 +227,49 @@ class ModelLobeA:
 
 
 class ModelLobeB:
-    def __init__(self, client: OpenAICompatibleClient) -> None:
+    def __init__(
+        self,
+        client: OpenAICompatibleClient,
+        *,
+        profile: LobeBProfile | str = LobeBProfile.BASE,
+    ) -> None:
         self.client = client
+        self.profile = LobeBProfile(profile)
+        self.last_core_review: BCoreReview | None = None
+
+    def _decision_with_core(
+        self,
+        *,
+        system: str,
+        user_text: str,
+        observation: RuntimeObservation,
+    ) -> LobeDecision:
+        raw = self.client.complete_json(system=system, user_text=user_text, observation=observation)
+        core_raw = raw.pop("core_review", None)
+        decision = LobeDecision.model_validate(raw, strict=False)
+        if core_raw is None:
+            review = BCoreReview(
+                profile=self.profile,
+                deception_grade=DeceptionGrade.YELLOW,
+                proof_required=("full evidence for any completion or artifact claim",),
+                summary="B did not receive a structured core review; treat claims as unverified.",
+            )
+        else:
+            review = BCoreReview.model_validate(core_raw, strict=False).model_copy(update={"profile": self.profile})
+        self.last_core_review = review
+        return decision.model_copy(update={"core_review": review})
 
     def prepare_next(self, task: str, active_batch: BatchSpec, observation: RuntimeObservation) -> LobeDecision:
-        raw = self.client.complete_json(system=_B_SYSTEM, user_text=_batch_prompt(task, observation, active_batch), observation=observation)
-        return LobeDecision.model_validate(raw, strict=False)
+        system = f"{_B_SYSTEM}\nManual profile: {self.profile.value}. {_PROFILE_INSTRUCTIONS[self.profile]}"
+        return self._decision_with_core(
+            system=system,
+            user_text=_batch_prompt(task, observation, active_batch, profile=self.profile),
+            observation=observation,
+        )
 
 
-class ModelScreenLobeB:
+class ModelScreenLobeB(ModelLobeB):
     """Vision-backed B for the continuous screen-awareness runtime."""
-
-    def __init__(self, client: OpenAICompatibleClient) -> None:
-        self.client = client
 
     def inspect_screen(
         self,
@@ -211,18 +292,32 @@ class ModelScreenLobeB:
         observation: RuntimeObservation,
         assessment: ScreenAssessment,
     ) -> LobeDecision:
-        raw = self.client.complete_json(
-            system=_SCREEN_GATE_SYSTEM,
+        return self._decision_with_core(
+            system=(
+                f"{_SCREEN_GATE_SYSTEM}\nManual profile: {self.profile.value}. "
+                f"{_PROFILE_INSTRUCTIONS[self.profile]}"
+            ),
             user_text=_screen_prompt(
                 task,
                 observation,
                 active_batch,
                 candidate=candidate,
                 assessment=assessment,
+                profile=self.profile,
             ),
             observation=observation,
         )
-        return LobeDecision.model_validate(raw, strict=False)
+
+
+class DynamicModelLobeB(ModelScreenLobeB):
+    """One manually profiled B implementation for both runtime architectures.
+
+    The profile is selected by the operator before a run and remains fixed for
+    that run. Context broadening and anti-deception review stay mandatory in
+    every profile; the profile only selects B's additional emphasis.
+    """
+
+    pass
 
 
 __all__ = [
@@ -230,5 +325,6 @@ __all__ = [
     "ModelLobeA",
     "ModelLobeB",
     "ModelScreenLobeB",
+    "DynamicModelLobeB",
     "OpenAICompatibleClient",
 ]
