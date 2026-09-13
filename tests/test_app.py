@@ -52,6 +52,17 @@ def test_cli_authorize_from_missing_file(capsys):
     assert main(["authorize", "@/nonexistent/action.json"]) != 0
 
 
+def test_cli_authorize_persists_journal(tmp_path, capsys):
+    db_path = str(tmp_path / "j.db")
+    journal = tmp_path / "j.db"
+    assert main(["authorize", json.dumps({"kind": "type", "text": "hi"}),
+                 "--journal", db_path]) == 0
+    assert main(["journal", db_path, "--verify", "--run-id", "cli-run"]) == 0
+    out = capsys.readouterr().out
+    assert "verifies=True" in out
+    assert main(["journal", db_path, "--run-id", "cli-run"]) == 0
+
+
 def test_cli_journal_roundtrip(tmp_path):
     path = str(tmp_path / "journal.db")
     assert main(["journal", path, "--verify", "--run-id", "r"]) == 0

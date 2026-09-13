@@ -43,7 +43,7 @@ def _cmd_authorize(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     try:
-        result = authorize(payload, run_id=args.run_id, ttl=args.ttl)
+        result = authorize(payload, run_id=args.run_id, ttl=args.ttl, journal_path=args.journal)
     except (ValueError, KeyError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -88,6 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
     auth.add_argument("action", help="JSON describing the action, e.g. {\"kind\":\"type\",\"text\":\"hi\"}")
     auth.add_argument("--run-id", default="cli-run", help="run identifier (default: cli-run)")
     auth.add_argument("--ttl", type=float, default=30.0, help="permit TTL in seconds (default: 30)")
+    auth.add_argument("--journal", default=None, help="SQLite journal path to persist events (default: in-memory)")
     auth.set_defaults(func=_cmd_authorize)
 
     journal = sub.add_parser("journal", help="inspect or verify a durable event journal")

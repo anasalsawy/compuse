@@ -56,8 +56,8 @@ def run_demo() -> list[str]:
 
 
 def authorize(action_payload: dict[str, Any], *, run_id: str = "cli-run",
-              ttl: float = 30.0) -> dict[str, Any]:
-    """One-shot propose -> issue -> consume -> release against an in-memory journal."""
+              ttl: float = 30.0, journal_path: str | None = None) -> dict[str, Any]:
+    """One-shot propose -> issue -> consume -> release, optionally persisted."""
     action = build_action(action_payload)
     observation = Observation(
         run_id=run_id,
@@ -65,7 +65,7 @@ def authorize(action_payload: dict[str, Any], *, run_id: str = "cli-run",
         captured_at=datetime.now(timezone.utc),
         coordinate_space_id="cli-space",
     )
-    store = EventStore()
+    store = EventStore(journal_path if journal_path else ":memory:")
     coordinator = Coordinator(store=store)
     proposal = ActionProposal(
         action_id=f"{run_id}-action",
