@@ -1,1 +1,3 @@
-from .events import EventStore
+from .events import EventIntegrityError, EventStore
+
+__all__ = ["EventStore", "EventIntegrityError"]

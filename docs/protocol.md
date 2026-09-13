@@ -1,7 +1,15 @@
-# Protocol notes
+# Protocol
 
-The portable protocol uses strict Pydantic models with forbidden extra fields. Actions are discriminated by `kind` and include waits, screenshots, mouse movement, text, clicks, dragging, scrolling, keypresses, key combinations, focus, and logical application launch.
+The portable boundary uses strict Pydantic models and discriminated actions. Unknown fields are rejected; provider/environment content cannot authorize mutations. `Coordinator.consume()` authorizes dispatch only and never asserts execution success.
 
-`Observation` binds a run to a revision and coordinate-space identity. `ActionProposal` binds an action to an observation revision, coordinate space, policy revision, origin, and optional capability metadata. `digest_action()` produces deterministic SHA-256 JSON digests. `Permit` binds the resulting action hash to the observation and policy and is single-use and expiring.
+## Lifecycle states
 
-This protocol is intentionally portable. It does not yet define a durable run state machine, native-helper request/response envelopes, leases, executor results, or verification artifacts. Those additions must preserve strict validation and fail closed on mismatches.
+`compuse.coordinator.states` defines explicit `RunState` and `ActionState` transitions. Terminal states cannot re-enter an active state. An executor outcome may be `UNKNOWN`; it must enter reconciliation and may not jump directly to `VERIFIED`.
+
+## Audit integrity
+
+`EventStore` canonicalizes JSON payloads and links events with SHA-256 hashes per run. `verify()` checks sequence continuity and every link. This is tamper-evident, not an external authenticity guarantee: an actor able to rewrite the database can recompute the chain.
+
+## Compatibility
+
+The action discriminator and action digest are part of the portable contract. Additive protocol changes require tests for serialization and digest stability.
