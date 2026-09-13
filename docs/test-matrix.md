@@ -1,10 +1,15 @@
 # Test matrix
 
-| Area | Command/evidence | Status |
-|---|---|---|
-| Portable protocol/coordinator | `python -m pytest -ra` | Verified only when run in the current environment |
-| Lifecycle transitions | `tests/test_states.py` | Portable |
-| Event integrity and tamper detection | `tests/test_storage.py` | Portable |
-| Windows UI Automation/native helper | Windows interactive test suite | Not implemented / blocked |
+| Area | Portable test suite | Windows acceptance suite |
+|---|---:|---:|
+| Strict protocol validation | Yes | No |
+| Permit binding and replay rejection | Yes | No |
+| Lifecycle transition tables | Yes | No |
+| SQLite event integrity | Yes | No |
+| Concurrent journal appends | Yes | No |
+| Native helper | No | Not implemented |
+| UI Automation | No | Not implemented |
+| Notepad workflow | No | Not implemented |
+| Process/window/session identity | No | Not implemented |
 
-The portable suite does not prove Windows behavior, desktop identity, UI Automation, physical input, or post-action desktop verification.
+Portable tests prove Python invariants only. No Windows-native result should be inferred until an interactive Windows acceptance suite exists.

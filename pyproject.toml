@@ -1,18 +1,22 @@
 [build-system]
 requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
+
 [project]
 name = "compuse"
-version = "0.2.0"
+version = "0.2.1"
 description = "Safety-first coordination core for local-first computer use"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {file = "LICENSE"}
 dependencies = ["pydantic>=2.7,<3"]
+
 [project.optional-dependencies]
-test = ["pytest>=8"]
+test = ["pytest>=8", "pytest-cov>=5"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["compuse"]
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 addopts = "-ra"

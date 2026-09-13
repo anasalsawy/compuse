@@ -18,9 +18,9 @@ class EventIntegrityError(RuntimeError):
 class EventStore:
     """SQLite-backed, per-run hash-chained event journal.
 
-    A store owns its connection.  All operations are serialized for callers
-    sharing an instance, while SQLite transactions provide cross-process
-    serialization for file-backed databases.
+    Each instance owns one connection. Operations are serialized within the
+    instance; SQLite transactions serialize file-backed writers across
+    processes. Callers must not use ``db`` directly in production code.
     """
 
     def __init__(self, path: str | Path = ":memory:") -> None:
@@ -66,8 +66,9 @@ class EventStore:
 
     @staticmethod
     def _hash(previous: str, run_id: str, seq: int, event_type: str, body: str, timestamp: str) -> str:
-        material = f"{previous}|{run_id}|{seq}|{event_type}|{body}|{timestamp}"
-        return hashlib.sha256(material.encode()).hexdigest()
+        return hashlib.sha256(
+            f"{previous}|{run_id}|{seq}|{event_type}|{body}|{timestamp}".encode()
+        ).hexdigest()
 
     def append(self, run_id: str, event_type: str, payload: Any, timestamp: str) -> int:
         if not run_id or not event_type or not timestamp:
