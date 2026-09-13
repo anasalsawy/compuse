@@ -11,6 +11,10 @@ requires-python = ">=3.11"
 license = {file = "LICENSE"}
 dependencies = ["pydantic>=2.7,<3"]
 
+[project.scripts]
+compuse = "compuse.app.cli:main"
+compuse-gui = "compuse.app.gui:main"
+
 [project.optional-dependencies]
 test = ["pytest>=8", "pytest-cov>=5"]
 
