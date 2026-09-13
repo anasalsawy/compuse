@@ -1,4 +1,4 @@
-"""Deterministic shell proof and comparison for both dual-lobe runtimes."""
+"""Deterministic shell proof and three-way architecture comparison."""
 from __future__ import annotations
 
 import argparse
@@ -15,8 +15,28 @@ from compuse.agent.contracts import (
     RuntimeObservation,
     ScreenAssessment,
 )
-from compuse.agent.runtime import DualLobeRuntime, ScreenAwareDualLobeRuntime
+from compuse.agent.runtime import DualLobeRuntime, ScreenAwareDualLobeRuntime, SingleLoopRuntime
 from compuse.protocol import Wait
+
+
+_SCENARIOS = {
+    "simple": (
+        ("home", "mid", 3),
+        ("mid", "done", 2),
+    ),
+    "complex": (
+        ("home", "catalog", 4),
+        ("catalog", "product", 3),
+        ("product", "basket", 3),
+        ("basket", "done", 2),
+    ),
+}
+
+
+def _task_for(scenario: str) -> str:
+    if scenario == "complex":
+        return "research the catalog, inspect a product, add it to the basket, and finish the workflow"
+    return "complete the deterministic shell demonstration"
 
 
 def _observation(revision: int, marker: str) -> RuntimeObservation:
@@ -62,11 +82,22 @@ def _batch(
 
 
 class DemoAdapter:
-    def __init__(self) -> None:
+    def __init__(self, scenario: str = "simple") -> None:
+        if scenario not in _SCENARIOS:
+            raise ValueError(f"unknown demo scenario: {scenario}")
+        self.scenario = scenario
+        self.steps = _SCENARIOS[scenario]
         self.marker = "home"
         self.revision = 0
         self.actions_in_state = 0
         self.execution_started = threading.Event()
+        self.execution_active = threading.Event()
+
+    def step_for(self, marker: str) -> tuple[str, int] | None:
+        for start_marker, end_marker, action_count in self.steps:
+            if start_marker == marker:
+                return end_marker, action_count
+        return None
 
     def observe(self) -> RuntimeObservation:
         self.revision += 1
@@ -74,14 +105,16 @@ class DemoAdapter:
 
     def execute_action(self, action) -> dict[str, object]:
         self.execution_started.set()
-        time.sleep(0.06)
-        self.actions_in_state += 1
-        if self.marker == "home" and self.actions_in_state == 3:
-            self.marker = "mid"
-            self.actions_in_state = 0
-        elif self.marker == "mid" and self.actions_in_state == 2:
-            self.marker = "done"
-            self.actions_in_state = 0
+        self.execution_active.set()
+        try:
+            time.sleep(0.06)
+            self.actions_in_state += 1
+            step = self.step_for(self.marker)
+            if step is not None and self.actions_in_state == step[1]:
+                self.marker = step[0]
+                self.actions_in_state = 0
+        finally:
+            self.execution_active.clear()
         return {"performed": True, "detail": "shell demo action completed"}
 
 
@@ -91,18 +124,37 @@ class DemoLobeA:
         self.prediction_started_during_execution = False
 
     def plan_initial(self, task: str, observation: RuntimeObservation) -> BatchSpec | None:
-        if "home" in observation.visible_markers:
-            return _batch("a0", None, "home", "mid", "A", 3)
-        if "mid" in observation.visible_markers:
-            return _batch("a-replan", None, "mid", "done", "A", 2, terminal=True)
-        return None
+        marker = observation.visible_markers[0] if observation.visible_markers else "unknown"
+        step = self.adapter.step_for(marker)
+        if step is None:
+            return None
+        end_marker, action_count = step
+        batch_id = "a0" if marker == "home" else f"a-replan-{marker}"
+        return _batch(batch_id, None, marker, end_marker, "A", action_count, terminal=end_marker == "done")
 
     def predict_next(self, task: str, active_batch: BatchSpec, observation: RuntimeObservation) -> BatchSpec | None:
-        self.prediction_started_during_execution = self.adapter.execution_started.is_set()
+        # Thread scheduling may enter this function just before the executor
+        # starts its first action.  Wait for the physical action window so the
+        # proof records overlap, while the control group still sees it closed.
+        self.adapter.execution_started.wait(timeout=0.25)
+        self.prediction_started_during_execution = (
+            self.prediction_started_during_execution or self.adapter.execution_active.is_set()
+        )
         time.sleep(0.10)
-        if active_batch.batch_id == "a0":
-            return _batch("a-predicted", active_batch.batch_id, "mid", "done", "A", 2, terminal=True)
-        return None
+        marker = active_batch.predicted_end.required_markers[0]
+        step = self.adapter.step_for(marker)
+        if step is None:
+            return None
+        end_marker, action_count = step
+        return _batch(
+            f"a-predicted-{marker}",
+            active_batch.batch_id,
+            marker,
+            end_marker,
+            "A",
+            action_count,
+            terminal=end_marker == "done",
+        )
 
 
 class DemoLobeB:
@@ -112,16 +164,29 @@ class DemoLobeB:
         self.saw_predicted_end = False
 
     def prepare_next(self, task: str, active_batch: BatchSpec, observation: RuntimeObservation) -> LobeDecision:
-        self.prepare_started_during_execution = self.adapter.execution_started.is_set()
-        self.saw_predicted_end = bool(active_batch.predicted_end.required_markers)
+        self.prepare_started_during_execution = (
+            self.prepare_started_during_execution or self.adapter.execution_active.is_set()
+        )
+        self.saw_predicted_end = self.saw_predicted_end or bool(active_batch.predicted_end.required_markers)
         time.sleep(0.10)
-        if active_batch.batch_id == "a0":
-            return LobeDecision(
-                approved=True,
-                reason="B confirmed A's predicted end anchor",
-                batch=_batch("b0", active_batch.batch_id, "mid", "done", "B", 2, terminal=True),
-            )
-        return LobeDecision(approved=False, reason="terminal batch; no next handoff")
+        marker = active_batch.predicted_end.required_markers[0]
+        step = self.adapter.step_for(marker)
+        if step is None:
+            return LobeDecision(approved=False, reason="terminal batch; no next handoff")
+        end_marker, action_count = step
+        return LobeDecision(
+            approved=True,
+            reason="B confirmed A's predicted end anchor",
+            batch=_batch(
+                f"b-prepared-{marker}",
+                active_batch.batch_id,
+                marker,
+                end_marker,
+                "B",
+                action_count,
+                terminal=end_marker == "done",
+            ),
+        )
 
 
 class ScreenDemoLobeB:
@@ -177,37 +242,52 @@ class ScreenDemoLobeB:
         )
 
 
-def run_demo(trace: Callable[[str], None] | None = None):
-    adapter = DemoAdapter()
+def run_control_demo(trace: Callable[[str], None] | None = None, scenario: str = "simple"):
+    adapter = DemoAdapter(scenario)
+    lobe_a = DemoLobeA(adapter)
+    runtime = SingleLoopRuntime(
+        adapter=adapter,
+        lobe_a=lobe_a,
+        run_id=f"control-shell-demo-{scenario}",
+        max_actions_per_batch=8,
+        trace=trace,
+    )
+    report = runtime.run(_task_for(scenario), max_batches=len(adapter.steps) + 2)
+    runtime.store.close()
+    return report, adapter, lobe_a, None
+
+
+def run_demo(trace: Callable[[str], None] | None = None, scenario: str = "simple"):
+    adapter = DemoAdapter(scenario)
     lobe_a = DemoLobeA(adapter)
     lobe_b = DemoLobeB(adapter)
     runtime = DualLobeRuntime(
         adapter=adapter,
         lobe_a=lobe_a,
         lobe_b=lobe_b,
-        run_id="dual-loop-shell-demo",
+        run_id=f"dual-loop-shell-demo-{scenario}",
         max_actions_per_batch=8,
         trace=trace,
     )
-    report = runtime.run("complete the deterministic shell demonstration", max_batches=4)
+    report = runtime.run(_task_for(scenario), max_batches=len(adapter.steps) + 2)
     runtime.store.close()
     return report, adapter, lobe_a, lobe_b
 
 
-def run_screen_aware_demo(trace: Callable[[str], None] | None = None):
-    adapter = DemoAdapter()
+def run_screen_aware_demo(trace: Callable[[str], None] | None = None, scenario: str = "simple"):
+    adapter = DemoAdapter(scenario)
     lobe_a = DemoLobeA(adapter)
     screen_lobe = ScreenDemoLobeB()
     runtime = ScreenAwareDualLobeRuntime(
         adapter=adapter,
         lobe_a=lobe_a,
         screen_lobe=screen_lobe,
-        run_id="screen-aware-shell-demo",
+        run_id=f"screen-aware-shell-demo-{scenario}",
         max_actions_per_batch=8,
         screen_poll_interval=0.02,
         trace=trace,
     )
-    report = runtime.run("complete the deterministic shell demonstration", max_batches=4)
+    report = runtime.run(_task_for(scenario), max_batches=len(adapter.steps) + 2)
     runtime.store.close()
     return report, adapter, lobe_a, screen_lobe
 
@@ -219,6 +299,11 @@ def _print_proof(label: str, report, adapter: DemoAdapter, lobe_a: DemoLobeA, lo
     print(f"batches_executed={report.batches_executed}", flush=True)
     print(f"actions_executed={report.actions_executed}", flush=True)
     print(f"A_prediction_started_during_execution={lobe_a.prediction_started_during_execution}", flush=True)
+    if lobe_b is None:
+        print("control_has_no_prediction_during_execution=True", flush=True)
+        passed = report.status == "completed" and not lobe_a.prediction_started_during_execution
+        print("CONTROL_BASELINE=PASS" if passed else "CONTROL_BASELINE=FAIL", flush=True)
+        return passed
     if isinstance(lobe_b, DemoLobeB):
         print(f"B_preparation_started_during_execution={lobe_b.prepare_started_during_execution}", flush=True)
         print(f"B_saw_A_predicted_end={lobe_b.saw_predicted_end}", flush=True)
@@ -252,14 +337,21 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--architecture",
-        choices=("predictive", "screen-aware", "compare"),
+        choices=("control", "predictive", "screen-aware", "compare"),
         default="compare",
-        help="run one architecture or both (default: compare)",
+        help="run one architecture or all three (default: compare)",
+    )
+    parser.add_argument(
+        "--scenario",
+        choices=tuple(_SCENARIOS),
+        default="complex",
+        help="deterministic task length (default: complex)",
     )
     args = parser.parse_args(argv)
     runners = {
-        "predictive": ("predictive", run_demo),
-        "screen-aware": ("screen-aware", run_screen_aware_demo),
+        "control": ("control", lambda trace: run_control_demo(trace=trace, scenario=args.scenario)),
+        "predictive": ("predictive", lambda trace: run_demo(trace=trace, scenario=args.scenario)),
+        "screen-aware": ("screen-aware", lambda trace: run_screen_aware_demo(trace=trace, scenario=args.scenario)),
     }
     selected = list(runners) if args.architecture == "compare" else [args.architecture]
     passed_all = True

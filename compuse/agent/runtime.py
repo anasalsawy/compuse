@@ -93,7 +93,7 @@ class DualLobeRuntime:
         *,
         adapter: DesktopAdapter,
         lobe_a: LobeA,
-        lobe_b: LobeB,
+        lobe_b: LobeB | None = None,
         run_id: str = "dual-lobe-run",
         journal_path: str | None = None,
         ttl: float = 30.0,
@@ -283,6 +283,8 @@ class DualLobeRuntime:
             raise ValueError("task must not be empty")
         if max_batches < 1:
             raise ValueError("max_batches must be positive")
+        if self.lobe_b is None:
+            raise RuntimeError("DualLobeRuntime requires lobe_b")
 
         transcript: list[str] = []
         discarded = 0
@@ -425,6 +427,117 @@ class DualLobeRuntime:
             run_id=self.run_id,
             status=status,
             batches_executed=len([line for line in transcript if line.startswith("execute ")]),
+            batches_discarded=discarded,
+            actions_executed=actions_executed,
+            transcript=tuple(transcript),
+            final_observation=observation,
+        )
+
+
+class SingleLoopRuntime(DualLobeRuntime):
+    """Control group: one planner observes, plans, then executes serially."""
+
+    def run(self, task: str, *, max_batches: int = 32) -> RuntimeReport:
+        if not task.strip():
+            raise ValueError("task must not be empty")
+        if max_batches < 1:
+            raise ValueError("max_batches must be positive")
+
+        transcript: list[str] = []
+        discarded = 0
+        actions_executed = 0
+        observation = self._observe()
+        self._trace("RUN", state="START", run_id=self.run_id, architecture="control", task=task)
+        self._append("run_started", {"task": task, "architecture": "control", "observation": observation.journal_view()})
+        self._trace("A", state="PLAN_INITIAL_START")
+        active = self.lobe_a.plan_initial(task, observation)
+        self._trace("A", state="PLAN_INITIAL_DONE", batch=active.batch_id if active else "none")
+        if active is None:
+            self._append("run_finished", {"status": "no_plan"})
+            return RuntimeReport(
+                run_id=self.run_id,
+                status="no_plan",
+                batches_executed=0,
+                batches_discarded=0,
+                actions_executed=0,
+                transcript=(),
+                final_observation=observation,
+            )
+        if not active.preconditions.matches(observation):
+            raise StaleBatch("initial batch does not match the starting observation")
+
+        terminal_executed = False
+        for _batch_number in range(max_batches):
+            if not active.preconditions.matches(observation):
+                discarded += 1
+                transcript.append(f"discard {active.batch_id}: actual state no longer matches its preconditions")
+                self._append("batch_discarded", {"batch_id": active.batch_id, "reason": "stale_before_execution"})
+                active = self.lobe_a.plan_initial(task, observation)
+                if active is None:
+                    break
+                continue
+
+            transcript.append(f"execute {active.batch_id}: {len(active.actions)} action(s)")
+            self._trace("LOOP", state="ACTIVE", batch=active.batch_id, actions=len(active.actions))
+            execution = self._execute_batch(active, observation)
+            actions_executed += len(execution.results)
+            observation = execution.actual_observation
+            self._trace("BOUNDARY", state="OBSERVED", batch=active.batch_id, revision=observation.revision)
+
+            if not execution.ok or execution.uncertain:
+                transcript.append(f"recovery after {active.batch_id}: {execution.error or 'verification failed'}")
+                self._append("speculation_invalidated", {"batch_id": active.batch_id, "reason": execution.error or "execution_not_verified"})
+                active = self.lobe_a.plan_initial(task, observation)
+                if active is None:
+                    break
+                discarded += 1
+                continue
+
+            if active.terminal:
+                terminal_executed = True
+                transcript.append(f"terminal batch completed: {active.batch_id}")
+                self._trace("RUN", state="TERMINAL", batch=active.batch_id)
+                break
+
+            # This is the intentional control-group gap: A cannot prepare the
+            # next batch until the current batch has finished and been observed.
+            self._trace("A", state="PLAN_NEXT_START", source=active.batch_id)
+            try:
+                candidate = self.lobe_a.predict_next(task, active, observation)
+            except Exception as exc:  # noqa: BLE001 - recover from planner failure
+                candidate = None
+                transcript.append(f"lobe A prediction unavailable: {exc}")
+            self._trace("A", state="PLAN_NEXT_DONE", source=active.batch_id, batch=candidate.batch_id if candidate else "none")
+
+            if candidate is None or not self._valid_next_batch(active, candidate) or not candidate.preconditions.matches(observation):
+                discarded += 1
+                transcript.append(f"discard control next batch after {active.batch_id}: candidate failed contract")
+                self._append("batch_discarded", {
+                    "batch_id": candidate.batch_id if candidate else None,
+                    "source_batch_id": active.batch_id,
+                    "reason": "candidate_contract_failed",
+                })
+                active = self.lobe_a.plan_initial(task, observation)
+            else:
+                active = candidate
+                self._trace("HANDOFF", state="ACCEPTED", batch=active.batch_id, source=active.preconditions.source_batch_id)
+
+            if active is None:
+                break
+
+        status = "completed" if terminal_executed else ("no_next_plan" if active is None else "batch_limit")
+        batches_executed = len([line for line in transcript if line.startswith("execute ")])
+        self._append("run_finished", {
+            "status": status,
+            "batches_executed": batches_executed,
+            "batches_discarded": discarded,
+            "actions_executed": actions_executed,
+        })
+        self._trace("RUN", state=status.upper(), batches=batches_executed, actions=actions_executed)
+        return RuntimeReport(
+            run_id=self.run_id,
+            status=status,
+            batches_executed=batches_executed,
             batches_discarded=discarded,
             actions_executed=actions_executed,
             transcript=tuple(transcript),
@@ -744,5 +857,6 @@ __all__ = [
     "LobeB",
     "ScreenAwareDualLobeRuntime",
     "ScreenAwareLobeB",
+    "SingleLoopRuntime",
     "StaleBatch",
 ]

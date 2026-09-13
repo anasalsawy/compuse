@@ -20,10 +20,17 @@ compuse-agent "Open Chrome and navigate to example.com" --live
 but refuses physical input, so a model call cannot accidentally move the user's
 mouse or type into an application.
 
-## Two comparable pipelines
+## Three comparable pipelines
 
-Compuse exposes both architectures so their behavior can be measured on the
-same task.
+Compuse exposes a serial control group and both dual-lobe architectures so
+their behavior can be measured on the same task.
+
+### Serial control group
+
+`SingleLoopRuntime` uses the same typed actions, adapter, and post-batch
+observation boundary, but has no overlap. Lobe A plans the next batch only
+after the current batch finishes and the desktop has been observed. Its trace
+shows the planning gap that the dual-lobe modes are intended to hide.
 
 ### Predictive handoff
 

@@ -32,24 +32,27 @@ refuses mouse, keyboard, launch, file, and browser mutations.
 
 ## Prove the loop from a shell
 
-Run the deterministic comparison first. It uses both real runtime classes on
-the same task, prints timestamps, and performs no desktop input:
+Run the deterministic comparison first. It uses the real runtime classes on
+the same multi-stage task, prints timestamps, and performs no desktop input:
 
 ```powershell
-compuse-dual-loop-demo
+compuse-dual-loop-demo --scenario complex --architecture compare
 ```
 
-The output compares two designs:
+The output compares three designs:
 
+- `control`: one loop plans the next batch only after the current batch
+  finishes and is observed. This is the baseline planning-gap control group.
 - `predictive`: A predicts the next batch while the current batch executes and
   B independently prepares the handoff from A's predicted end.
 - `screen-aware`: A predicts the next batch while B continuously samples and
   assesses the screen, interrupts unsafe execution at an action boundary, and
   gates the handoff against the fresh screen.
 
-Run either proof alone with `--architecture predictive` or
-`--architecture screen-aware`. Each successful proof ends in
-`CONTINUOUS_HANDOFF=PASS`; the comparison ends in `COMPARISON=PASS`.
+Run one proof alone with `--architecture control`, `--architecture predictive`,
+or `--architecture screen-aware`. The control proof ends in
+`CONTROL_BASELINE=PASS`; each dual-lobe proof ends in
+`CONTINUOUS_HANDOFF=PASS`; the three-way comparison ends in `COMPARISON=PASS`.
 
 To see either architecture use the real model and desktop adapter, add
 `--trace` and select the architecture explicitly:

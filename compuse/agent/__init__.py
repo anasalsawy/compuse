@@ -19,6 +19,7 @@ from .runtime import (
     DesktopAdapter,
     ScreenAwareDualLobeRuntime,
     ScreenAwareLobeB,
+    SingleLoopRuntime,
     StaleBatch,
 )
 
@@ -39,5 +40,6 @@ __all__ = [
     "ScreenAssessment",
     "ScreenAwareDualLobeRuntime",
     "ScreenAwareLobeB",
+    "SingleLoopRuntime",
     "StaleBatch",
 ]

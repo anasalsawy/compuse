@@ -12,7 +12,7 @@ from compuse.agent.contracts import (
     RuntimeObservation,
 )
 from compuse.agent.runtime import DualLobeRuntime
-from compuse.app.dual_loop_demo import run_demo, run_screen_aware_demo
+from compuse.app.dual_loop_demo import run_control_demo, run_demo, run_screen_aware_demo
 from compuse.protocol import Wait
 
 
@@ -176,3 +176,25 @@ def test_screen_aware_demo_runs_continuous_watchdog_and_handoff():
     assert screen_lobe.screen_assessments > 0
     assert screen_lobe.handoff_checks > 0
     assert screen_lobe.saw_expected_transition is True
+
+
+def test_complex_demo_compares_control_and_both_dual_lobes():
+    control_report, control_adapter, control_a, _ = run_control_demo(scenario="complex")
+    predictive_report, predictive_adapter, predictive_a, predictive_b = run_demo(scenario="complex")
+    screen_report, screen_adapter, screen_a, screen_b = run_screen_aware_demo(scenario="complex")
+
+    for report, adapter in (
+        (control_report, control_adapter),
+        (predictive_report, predictive_adapter),
+        (screen_report, screen_adapter),
+    ):
+        assert report.status == "completed"
+        assert adapter.marker == "done"
+        assert report.batches_executed == 4
+        assert report.actions_executed == 12
+
+    assert control_a.prediction_started_during_execution is False
+    assert predictive_a.prediction_started_during_execution is True
+    assert predictive_b.prepare_started_during_execution is True
+    assert screen_a.prediction_started_during_execution is True
+    assert screen_b.screen_assessments > 0
