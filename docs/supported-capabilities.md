@@ -7,14 +7,19 @@
 | One-use expiring in-process permits | Implemented |
 | SQLite tamper-evident event journal | Implemented |
 | Fail-closed lifecycle transition tables | Implemented |
-| Windows native helper | Not implemented |
-| UI Automation | Not implemented |
-| Notepad vertical slice | Not implemented |
-| Process/window/session identity | Not implemented |
-| Durable coordinator state and leases | Not implemented |
-| Restart recovery and idempotency | Not implemented |
-| Executor dispatch and postcondition verification | Not implemented |
-| Browser, voice, provider/model, Electron, screenshots, installer | Not implemented |
-| Course import, scheduling, conflict detection, calendar export | Out of scope |
+| Speculative typed action batches | Implemented |
+| Concurrent A/B planning during execution | Implemented |
+| Predicted-end precondition gate | Implemented |
+| OpenAI-compatible vision model adapter | Implemented |
+| Headed desktop screenshots | Windows vertical slice; optional dependency |
+| Real mouse/keyboard input | Windows vertical slice; requires `--live` |
+| Win32 foreground-window/process identity | Windows vertical slice |
+| UI Automation visible markers | Optional when `pywinauto` is installed |
+| Independent postcondition verifier | Not implemented |
+| Durable permits, leases, and restart recovery | Not implemented |
+| Cancellation and emergency stop | Not implemented |
+| Installer and code signing | Not implemented |
+| Unattended production operation | Not supported |
 
-“Implemented” means covered by the portable Python test suite; it does not imply Windows integration or unattended desktop safety.
+Implemented runtime capabilities are covered by portable tests where possible;
+the Windows rows still require interactive Windows acceptance tests.

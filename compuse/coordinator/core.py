@@ -15,7 +15,7 @@ class Coordinator:
         if proposal.run_id!=observation.run_id or proposal.observation_revision!=observation.revision: raise PermitError("proposal is stale")
         if proposal.coordinate_space_id!=observation.coordinate_space_id: raise PermitError("coordinate space differs")
         if proposal.policy_revision!=self.policy_revision: raise PermitError("policy revision is not current")
-        permit=Permit(permit_id=uuid4(),run_id=proposal.run_id,action_id=proposal.action_id,action_hash=digest_action(proposal.action),observation_revision=observation.revision,coordinate_space_id=observation.coordinate_space_id,policy_revision=self.policy_revision,expires_at=now()+timedelta(seconds=ttl))
+        permit=Permit(permit_id=uuid4(),run_id=proposal.run_id,action_id=proposal.action_id,action_hash=digest_action(proposal.action),observation_revision=observation.revision,coordinate_space_id=observation.coordinate_space_id,policy_revision=self.policy_revision,expires_at=now()+timedelta(seconds=ttl),tool=proposal.tool,capability_hash=proposal.capability_hash,launch_policy_revision=proposal.launch_policy_revision,browser_revision=proposal.browser_revision,window_id=proposal.window_id,process_id=proposal.process_id,session_id=proposal.session_id,input_desktop=proposal.input_desktop,confirmation_id=proposal.confirmation_id)
         with self._lock:
             self._permits[permit.permit_id]=(permit,proposal); self.store.append(proposal.run_id,"permit_issued",permit.model_dump(mode="json"),now().isoformat())
         return permit
@@ -30,6 +30,7 @@ class Coordinator:
             if proposal.action_id!=permit.action_id or proposal.run_id!=permit.run_id: raise PermitError("proposal identity does not match permit")
             if proposal.origin in (Origin.ENVIRONMENT_CONTENT,Origin.PROVIDER_OUTPUT): raise PermitError("untrusted content cannot authorize an action")
             if proposal.policy_revision!=permit.policy_revision or proposal.coordinate_space_id!=permit.coordinate_space_id: raise PermitError("proposal binding differs")
+            if any((proposal.tool!=permit.tool, proposal.capability_hash!=permit.capability_hash, proposal.launch_policy_revision!=permit.launch_policy_revision, proposal.browser_revision!=permit.browser_revision, proposal.window_id!=permit.window_id, proposal.process_id!=permit.process_id, proposal.session_id!=permit.session_id, proposal.input_desktop!=permit.input_desktop, proposal.confirmation_id!=permit.confirmation_id)): raise PermitError("permit metadata binding differs")
             if observation.run_id!=permit.run_id or observation.revision!=permit.observation_revision or observation.coordinate_space_id!=permit.coordinate_space_id: raise PermitError("observation binding is stale")
             if digest_action(proposal.action)!=permit.action_hash or digest_action(original.action)!=permit.action_hash: raise PermitError("action binding is invalid")
             permit.consumed=True; self._active_permit=pid; self.store.append(permit.run_id,"permit_consumed",{"permit_id":str(pid)},now().isoformat()); return proposal.action

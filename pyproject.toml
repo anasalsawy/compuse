@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "compuse"
-version = "0.2.1"
-description = "Safety-first coordination core for local-first computer use"
+version = "0.3.0"
+description = "Guarded NeuralAgent-style desktop computer-use runtime"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {file = "LICENSE"}
@@ -14,9 +14,16 @@ dependencies = ["pydantic>=2.7,<3"]
 [project.scripts]
 compuse = "compuse.app.cli:main"
 compuse-gui = "compuse.app.gui:main"
+compuse-agent = "compuse.app.agent_cli:main"
 
 [project.optional-dependencies]
 test = ["pytest>=8", "pytest-cov>=5"]
+desktop = [
+    "pyautogui>=0.9.54",
+    "Pillow>=10",
+    "pyperclip>=1.8",
+    "pywinauto>=0.6.8; sys_platform == 'win32'",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["compuse"]
