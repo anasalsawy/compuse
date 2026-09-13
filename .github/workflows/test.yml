@@ -19,11 +19,10 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: pip install -e '.[test]'
       - name: Run tests
+        shell: bash
         run: |
-           if [ "${{ matrix.python-version }}" = "3.11" ]; then
-            # The CPython 3.11 coverage tracer intermittently aborts during
-            # the repository's SQLite thread stress test. Keep full tests on
-            # 3.11 and enforce the coverage gate on 3.12 and 3.13.
+          if [ "${{ matrix.python-version }}" = "3.11" ]; then
+            # CPython 3.11 coverage can abort during the SQLite thread stress test.
             xvfb-run -a pytest
           else
             xvfb-run -a pytest --cov=compuse --cov-report=term-missing --cov-fail-under=80
