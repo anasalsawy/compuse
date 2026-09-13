@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -20,7 +20,7 @@ jobs:
       - run: pip install -e '.[test]'
       - name: Run tests
         run: |
-          if [ "${{ matrix.python-version }}" = "3.11" ]; then
+           if [ "${{ matrix.python-version }}" = "3.11" ]; then
             # The CPython 3.11 coverage tracer intermittently aborts during
             # the repository's SQLite thread stress test. Keep full tests on
             # 3.11 and enforce the coverage gate on 3.12 and 3.13.
