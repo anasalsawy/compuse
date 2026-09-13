@@ -9,6 +9,7 @@ from pydantic import TypeAdapter
 from compuse.protocol import Action, ActionProposal, Observation, Origin, Permit, digest_action
 from compuse.coordinator import Coordinator
 from compuse.storage import EventStore
+from compuse.app.executor import execute
 
 
 def build_action(payload: dict[str, Any]) -> Action:
@@ -88,4 +89,41 @@ def authorize(action_payload: dict[str, Any], *, run_id: str = "cli-run",
     }
 
 
-__all__ = ["build_action", "demo", "run_demo", "authorize"]
+def perform(action_payload: dict[str, Any], *, run_id: str = "cli-run",
+            ttl: float = 30.0, journal_path: str | None = None) -> dict[str, Any]:
+    """Propose -> issue -> consume -> EXECUTE -> release, journaled as it goes."""
+    action = build_action(action_payload)
+    observation = Observation(
+        run_id=run_id,
+        revision=0,
+        captured_at=datetime.now(timezone.utc),
+        coordinate_space_id="cli-space",
+    )
+    store = EventStore(journal_path if journal_path else ":memory:")
+    coordinator = Coordinator(store=store)
+    proposal = ActionProposal(
+        action_id=f"{run_id}-action",
+        run_id=run_id,
+        action=action,
+        origin=Origin.USER_INTENT,
+        observation_revision=0,
+        coordinate_space_id="cli-space",
+        policy_revision=coordinator.policy_revision,
+    )
+    permit = coordinator.issue(proposal, observation, ttl=ttl)
+    approved = coordinator.consume(permit.permit_id, proposal, observation)
+    try:
+        execution = execute(approved)
+    finally:
+        coordinator.release(permit.permit_id)
+    return {
+        "approved": approved.model_dump(mode="json"),
+        "permit_id": str(permit.permit_id),
+        "policy_revision": permit.policy_revision,
+        "execution": execution,
+        "journal_events": len(store.events(run_id)),
+        "journal_verifies": store.verify(run_id),
+    }
+
+
+__all__ = ["build_action", "demo", "run_demo", "authorize", "perform"]

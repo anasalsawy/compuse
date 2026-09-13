@@ -1,7 +1,9 @@
 import json
+import sys
 import pytest
-from compuse.app.workflow import authorize, build_action, run_demo
+from compuse.app.workflow import authorize, build_action, perform, run_demo
 from compuse.app.cli import main
+from compuse.app.executor import execute, ExecutorError
 
 
 def test_demo_covers_full_lifecycle():
@@ -61,6 +63,72 @@ def test_cli_authorize_persists_journal(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "verifies=True" in out
     assert main(["journal", db_path, "--run-id", "cli-run"]) == 0
+
+
+def _fake_run_popen_factory(popen_calls):
+    def fake_popen(*args, **kwargs):
+        popen_calls["args"] = args[0]
+        return None
+    return fake_popen
+
+
+def test_execute_open_file_performs(monkeypatch, tmp_path):
+    from compuse.app import executor
+    target = tmp_path / "hi.txt"
+    target.write_text("hello", encoding="utf-8")
+    calls: dict = {}
+    if sys.platform == "win32":
+        monkeypatch.setattr(executor.os, "startfile", lambda p, *a, **k: calls.setdefault("called", p))
+    else:
+        monkeypatch.setattr(executor.subprocess, "Popen", _fake_run_popen_factory(calls))
+    action = build_action({"kind": "file.open", "path": str(target)})
+    result = execute(action)
+    assert result["performed"] is True
+    assert "opened" in result["detail"]
+
+
+def test_execute_open_missing_file_rejected(tmp_path):
+    action = build_action({"kind": "file.open", "path": str(tmp_path / "nope.txt")})
+    with pytest.raises(ExecutorError):
+        execute(action)
+
+
+def test_execute_browse_performs(monkeypatch):
+    from compuse.app import executor
+    calls: dict = {}
+    monkeypatch.setattr(executor.webbrowser, "open", lambda url, new=0: calls.setdefault("url", url))
+    action = build_action({"kind": "browse", "url": "https://example.com/"})
+    result = execute(action)
+    assert result["performed"] is True
+    assert calls["url"] == "https://example.com/"
+
+
+def test_execute_unsupported_kind_is_supervised(monkeypatch):
+    action = build_action({"kind": "type", "text": "hello"})
+    result = execute(action)
+    assert result["performed"] is False
+
+
+def test_perform_executes_and_journals(monkeypatch, tmp_path):
+    from compuse.app import executor
+    db = str(tmp_path / "perf.db")
+    calls: dict = {}
+    monkeypatch.setattr(executor.webbrowser, "open", lambda url, new=0: calls.setdefault("url", url))
+    result = perform({"kind": "browse", "url": "https://example.com/"}, run_id="perf-run",
+                     journal_path=db)
+    assert result["execution"]["performed"] is True
+    assert result["journal_events"] >= 2
+    assert result["journal_verifies"] is True
+    assert calls["url"] == "https://example.com/"
+
+
+def test_cli_open_and_browse(monkeypatch, tmp_path, capsys):
+    from compuse.app import executor
+    calls: dict = {}
+    monkeypatch.setattr(executor.webbrowser, "open", lambda url, new=0: calls.setdefault("url", url))
+    assert main(["browse", "https://example.com/"]) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["execution"]["performed"] is True
 
 
 def test_cli_journal_roundtrip(tmp_path):

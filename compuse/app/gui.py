@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from tkinter import BOTH, END, LEFT, X, ttk
 
-from compuse.app.workflow import authorize, demo
+from compuse.app.workflow import authorize, demo, perform
 
 
 class AppController:
@@ -25,6 +25,11 @@ class AppController:
     def authorize(self, payload: dict) -> dict:
         result = authorize(payload)
         self.log(f"authorized {result['approved']['kind']!r} permit {result['permit_id'][:8]}")
+        return result
+
+    def perform(self, payload: dict) -> dict:
+        result = perform(payload)
+        self.log(f"performed {result['execution']['detail']}")
         return result
 
 
@@ -54,6 +59,8 @@ class CompuseApp(ttk.Frame):
         ttk.Button(bar, text="Run Demo", command=self._on_demo).pack(side=LEFT, padx=2)
         ttk.Button(bar, text="Authorize: Type 'hello'", command=self._on_authorize).pack(side=LEFT, padx=2)
         ttk.Button(bar, text="Authorize: Click", command=self._on_click).pack(side=LEFT, padx=2)
+        ttk.Button(bar, text="Open File...", command=self._on_open_file).pack(side=LEFT, padx=2)
+        ttk.Button(bar, text="Browse...", command=self._on_browse).pack(side=LEFT, padx=2)
         ttk.Button(bar, text="Clear", command=self._on_clear).pack(side=LEFT, padx=2)
 
     def _append(self, line: str) -> None:
@@ -80,6 +87,27 @@ class CompuseApp(ttk.Frame):
         try:
             result = self.controller.authorize(payload)
             self._append(f"-> approved {result['approved']}")
+        except Exception as exc:
+            self._append(f"-> error: {exc}")
+
+    def _on_open_file(self) -> None:
+        from tkinter import filedialog
+
+        path = filedialog.askopenfilename(parent=self)
+        if path:
+            self._run_perform({"kind": "file.open", "path": path})
+
+    def _on_browse(self) -> None:
+        from tkinter import simpledialog
+
+        url = simpledialog.askstring("Browse", "URL:", parent=self, initialvalue="https://example.com")
+        if url:
+            self._run_perform({"kind": "browse", "url": url})
+
+    def _run_perform(self, payload: dict) -> None:
+        try:
+            result = self.controller.perform(payload)
+            self._append(f"-> {result['execution']['detail']}")
         except Exception as exc:
             self._append(f"-> error: {exc}")
 

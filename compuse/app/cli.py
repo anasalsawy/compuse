@@ -7,7 +7,7 @@ import sys
 from typing import Sequence
 
 from compuse import __version__
-from compuse.app.workflow import authorize, run_demo
+from compuse.app.workflow import authorize, perform, run_demo
 from compuse.storage import EventIntegrityError, EventStore
 
 
@@ -45,6 +45,21 @@ def _cmd_authorize(args: argparse.Namespace) -> int:
     try:
         result = authorize(payload, run_id=args.run_id, ttl=args.ttl, journal_path=args.journal)
     except (ValueError, KeyError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def _cmd_perform(args: argparse.Namespace) -> int:
+    payload = {"kind": args.kind}
+    if args.kind == "file.open":
+        payload["path"] = args.target
+    elif args.kind == "browse":
+        payload["url"] = args.target
+    try:
+        result = perform(payload, run_id=args.run_id, ttl=args.ttl, journal_path=args.journal)
+    except Exception as exc:  # noqa: BLE001 - surface executor errors to the user
         print(f"error: {exc}", file=sys.stderr)
         return 2
     print(json.dumps(result, indent=2))
@@ -90,6 +105,15 @@ def build_parser() -> argparse.ArgumentParser:
     auth.add_argument("--ttl", type=float, default=30.0, help="permit TTL in seconds (default: 30)")
     auth.add_argument("--journal", default=None, help="SQLite journal path to persist events (default: in-memory)")
     auth.set_defaults(func=_cmd_authorize)
+
+    for kind, help_text in (("file.open", "permit and open a file with the default app"),
+                            ("browse", "permit and open a URL in the default browser")):
+        cmd = sub.add_parser(kind, help=help_text)
+        cmd.add_argument("target", help="absolute path or URL")
+        cmd.add_argument("--run-id", default="cli-run", help="run identifier (default: cli-run)")
+        cmd.add_argument("--ttl", type=float, default=30.0, help="permit TTL in seconds (default: 30)")
+        cmd.add_argument("--journal", default=None, help="SQLite journal path to persist events (default: in-memory)")
+        cmd.set_defaults(func=_cmd_perform, kind=kind)
 
     journal = sub.add_parser("journal", help="inspect or verify a durable event journal")
     journal.add_argument("path", help="path to the SQLite journal file")
