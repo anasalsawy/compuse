@@ -7,6 +7,7 @@ import sys
 from typing import Sequence
 
 from compuse import __version__
+from compuse.app.sequence import load_steps, run_steps
 from compuse.app.workflow import authorize, perform, run_demo
 from compuse.storage import EventIntegrityError, EventStore
 
@@ -66,6 +67,23 @@ def _cmd_perform(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_run(args: argparse.Namespace) -> int:
+    try:
+        steps = load_steps(args.steps)
+    except Exception as exc:  # noqa: BLE001 - validation errors surface to the user
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    try:
+        result = run_steps(steps, run_id=args.run_id, ttl=args.ttl, journal_path=args.journal)
+    except Exception as exc:  # noqa: BLE001
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print("\n".join(result["transcript"]))
+    print(f"--- {result['steps']} step(s), {result['failures']} failed, "
+          f"journal verifies={result['journal_verifies']} ---")
+    return 0 if result["failures"] == 0 else 1
+
+
 def _cmd_journal(args: argparse.Namespace) -> int:
     db = EventStore(args.path)
     try:
@@ -105,6 +123,13 @@ def build_parser() -> argparse.ArgumentParser:
     auth.add_argument("--ttl", type=float, default=30.0, help="permit TTL in seconds (default: 30)")
     auth.add_argument("--journal", default=None, help="SQLite journal path to persist events (default: in-memory)")
     auth.set_defaults(func=_cmd_authorize)
+
+    runp = sub.add_parser("run", help="execute a multi-step browser run from a steps JSON file")
+    runp.add_argument("steps", help="path to steps JSON (or '@file' / '-' for stdin)")
+    runp.add_argument("--run-id", default="cli-run", help="run identifier (default: cli-run)")
+    runp.add_argument("--ttl", type=float, default=30.0, help="permit TTL in seconds (default: 30)")
+    runp.add_argument("--journal", default=None, help="SQLite journal path to persist events (default: in-memory)")
+    runp.set_defaults(func=_cmd_run)
 
     for kind, help_text in (("file.open", "permit and open a file with the default app"),
                             ("browse", "permit and open a URL in the default browser")):

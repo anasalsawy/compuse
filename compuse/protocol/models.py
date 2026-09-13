@@ -11,7 +11,7 @@ class StrictModel(BaseModel): model_config=ConfigDict(extra="forbid",strict=True
 class Origin(StrEnum):
  USER_INTENT="USER_INTENT"; SYSTEM_POLICY="SYSTEM_POLICY"; STRATEGIST_INSTRUCTION="STRATEGIST_INSTRUCTION"; EXECUTOR_INSTRUCTION="EXECUTOR_INSTRUCTION"; ENVIRONMENT_CONTENT="ENVIRONMENT_CONTENT"; PROVIDER_OUTPUT="PROVIDER_OUTPUT"
 class ActionKind(StrEnum):
- WAIT="wait"; SCREENSHOT="screenshot"; MOUSE_MOVE="mouse_move"; TYPE="type"; CLICK="click"; DOUBLE_CLICK="double_click"; DRAG="drag"; SCROLL="scroll"; KEYPRESS="keypress"; KEY_COMBO="key_combo"; FOCUS_WINDOW="window.focus"; LAUNCH="application.launch"; OPEN_FILE="file.open"; BROWSE="browse"
+ WAIT="wait"; SCREENSHOT="screenshot"; MOUSE_MOVE="mouse_move"; TYPE="type"; CLICK="click"; DOUBLE_CLICK="double_click"; DRAG="drag"; SCROLL="scroll"; KEYPRESS="keypress"; KEY_COMBO="key_combo"; FOCUS_WINDOW="window.focus"; LAUNCH="application.launch"; OPEN_FILE="file.open"; BROWSE="browse"; WEB_OP="web.op"
 class Wait(StrictModel): kind:Literal[ActionKind.WAIT]=ActionKind.WAIT; seconds:float=Field(ge=0,le=60)
 class Screenshot(StrictModel): kind:Literal[ActionKind.SCREENSHOT]=ActionKind.SCREENSHOT
 class MouseMove(StrictModel): kind:Literal[ActionKind.MOUSE_MOVE]=ActionKind.MOUSE_MOVE; x:int=Field(ge=-1000000,le=1000000); y:int=Field(ge=-1000000,le=1000000)
@@ -26,7 +26,14 @@ class FocusWindow(StrictModel): kind:Literal[ActionKind.FOCUS_WINDOW]=ActionKind
 class ApplicationLaunch(StrictModel): kind:Literal[ActionKind.LAUNCH]=ActionKind.LAUNCH; target_id:str=Field(min_length=1,max_length=128)
 class OpenFile(StrictModel): kind:Literal[ActionKind.OPEN_FILE]=ActionKind.OPEN_FILE; path:str=Field(min_length=1,max_length=1024)
 class Browse(StrictModel): kind:Literal[ActionKind.BROWSE]=ActionKind.BROWSE; url:str=Field(min_length=1,max_length=2048)
-Action=Annotated[Union[Wait,Screenshot,MouseMove,TypeText,Click,DoubleClick,Drag,Scroll,Keypress,KeyCombo,FocusWindow,ApplicationLaunch,OpenFile,Browse],Field(discriminator="kind")]
+class WebOp(StrictModel):
+ kind:Literal[ActionKind.WEB_OP]=ActionKind.WEB_OP
+ op:Literal["goto","click","type","wait"]="goto"
+ url:str|None=Field(default=None,max_length=2048)
+ selector:str|None=Field(default=None,max_length=1024)
+ text:str|None=Field(default=None,max_length=10000)
+ seconds:float=Field(default=1.0,ge=0,le=60)
+Action=Annotated[Union[Wait,Screenshot,MouseMove,TypeText,Click,DoubleClick,Drag,Scroll,Keypress,KeyCombo,FocusWindow,ApplicationLaunch,OpenFile,Browse,WebOp],Field(discriminator="kind")]
 class Observation(StrictModel):
  run_id:str=Field(min_length=1,max_length=128); revision:int=Field(ge=0); captured_at:datetime; coordinate_space_id:str=Field(min_length=1,max_length=256); foreground_window:str|None=None; process_id:int|None=Field(default=None,ge=0); session_id:int|None=Field(default=None,ge=0); input_desktop:str|None=Field(default=None,max_length=256)
  @field_validator("captured_at")

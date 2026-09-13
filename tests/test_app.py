@@ -4,6 +4,7 @@ import pytest
 from compuse.app.workflow import authorize, build_action, perform, run_demo
 from compuse.app.cli import main
 from compuse.app.executor import execute, ExecutorError
+from compuse.app.sequence import load_steps, run_steps
 
 
 def test_demo_covers_full_lifecycle():
@@ -129,6 +130,89 @@ def test_cli_open_and_browse(monkeypatch, tmp_path, capsys):
     assert main(["browse", "https://example.com/"]) == 0
     captured = capsys.readouterr()
     assert json.loads(captured.out)["execution"]["performed"] is True
+
+
+class _FakeEngine:
+    def __init__(self, trace: list[str]) -> None:
+        self.trace = trace
+        self.started = False
+
+    def start(self) -> None:
+        self.started = True
+
+    def run_webop(self, action) -> dict:
+        kind = action.op
+        self.trace.append(kind)
+        if kind == "goto":
+            return {"performed": True, "detail": f"navigated to {action.url}"}
+        if kind == "click":
+            return {"performed": True, "detail": f"clicked {action.selector}"}
+        if kind == "wait":
+            return {"performed": True, "detail": "waited"}
+        if kind == "type":
+            return {"performed": True, "detail": "typed"}
+        return {"performed": False, "detail": "unknown"}
+
+    def close(self) -> None:
+        self.started = False
+
+
+def test_run_steps_each_step_is_permitted_and_journaled(tmp_path):
+    from compuse.protocol import WebOp
+    steps = [
+        WebOp(op="goto", url="https://books.toscrape.com/"),
+        WebOp(op="click", selector="article.product_pod h3 a"),
+        WebOp(op="wait", seconds=0.25),
+    ]
+    trace: list[str] = []
+    result = run_steps(steps, run_id="seq-run", journal_path=str(tmp_path / "seq.db"),
+                       browser=_FakeEngine(trace))
+    assert result["failures"] == 0
+    assert result["steps"] == 3
+    assert trace == ["goto", "click", "wait"]
+    assert result["journal_events"] == 6
+    assert result["journal_verifies"] is True
+    for i, line in enumerate(result["transcript"]):
+        assert str(i + 1) in line
+
+
+def test_run_steps_continues_on_step_failure(tmp_path):
+    from compuse.protocol import WebOp
+
+    class Boom(_FakeEngine):
+        def run_webop(self, action):
+            self.trace.append(action.op)
+            if action.op == "click":
+                raise RuntimeError("selector not found")
+            return {"performed": True, "detail": "ok"}
+
+    steps = [WebOp(op="goto", url="https://x/"), WebOp(op="click", selector="#nope"), WebOp(op="wait", seconds=0.1)]
+    result = run_steps(steps, run_id="seq-boom", browser=Boom([]))
+    assert result["failures"] == 1
+    assert "ERROR" in result["transcript"][1]
+    assert result["journal_verifies"] is True
+
+
+def test_load_steps_validates(tmp_path):
+    path = tmp_path / "steps.json"
+    path.write_text(json.dumps([{"op": "goto", "url": "https://example.com/"}, {"op": "bad"}]), encoding="utf-8")
+    with pytest.raises(Exception):
+        load_steps(str(path))
+
+
+def test_cli_run_with_steps_file(monkeypatch, tmp_path, capsys):
+    from compuse.app import cli
+    path = tmp_path / "steps.json"
+    path.write_text(json.dumps([{"op": "goto", "url": "https://books.toscrape.com/"},
+                                {"op": "click", "selector": "a"}, {"op": "wait", "seconds": 0.1}]),
+                    encoding="utf-8")
+    trace: list[str] = []
+    monkeypatch.setattr(cli, "run_steps", lambda steps, **k: run_steps(
+        steps, run_id="cli-run", browser=_FakeEngine(trace)))
+    assert main(["run", str(path)]) == 0
+    captured = capsys.readouterr()
+    assert "3 step(s)" in captured.out
+    assert "journal verifies=True" in captured.out
 
 
 def test_cli_journal_roundtrip(tmp_path):
