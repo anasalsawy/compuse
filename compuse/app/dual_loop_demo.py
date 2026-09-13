@@ -164,6 +164,9 @@ class DemoLobeB:
         self.saw_predicted_end = False
 
     def prepare_next(self, task: str, active_batch: BatchSpec, observation: RuntimeObservation) -> LobeDecision:
+        # Make the demo's overlap assertion deterministic across Python
+        # versions and hosted-runner thread scheduling.
+        self.adapter.execution_started.wait(timeout=0.25)
         self.prepare_started_during_execution = (
             self.prepare_started_during_execution or self.adapter.execution_active.is_set()
         )
