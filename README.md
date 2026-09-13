@@ -30,6 +30,19 @@ compuse-agent "Open Chrome and navigate to example.com" --live
 Use `--live` only after reviewing the task. Without it, the desktop adapter
 refuses mouse, keyboard, launch, file, and browser mutations.
 
+## Prove the loop from a shell
+
+Run the deterministic proof first. It uses the real `DualLobeRuntime`, prints
+timestamps for execution/A prediction/B preparation, and performs no desktop
+input:
+
+```powershell
+compuse-dual-loop-demo
+```
+
+The final line must be `CONTINUOUS_HANDOFF=PASS`. To see the same trace while
+using the real model and desktop adapter, add `--trace` to `compuse-agent`.
+
 ## Portable core
 
 The original coordination core remains available and provides:

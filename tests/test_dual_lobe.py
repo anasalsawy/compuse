@@ -12,6 +12,7 @@ from compuse.agent.contracts import (
     RuntimeObservation,
 )
 from compuse.agent.runtime import DualLobeRuntime
+from compuse.app.dual_loop_demo import run_demo
 from compuse.protocol import Wait
 
 
@@ -153,3 +154,13 @@ def test_mismatched_predicted_end_is_discarded(tmp_path):
     assert report.batches_executed == 1
     assert report.batches_discarded == 1
     assert lobe_a.initial_calls == 2
+
+
+def test_shell_demo_proves_real_runtime_overlap():
+    report, adapter, lobe_a, lobe_b = run_demo()
+
+    assert report.status == "completed"
+    assert adapter.marker == "done"
+    assert lobe_a.prediction_started_during_execution is True
+    assert lobe_b.prepare_started_during_execution is True
+    assert lobe_b.saw_predicted_end is True

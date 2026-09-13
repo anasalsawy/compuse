@@ -26,6 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--api-key", default=None, help="API key; prefer COMPUSE_LLM_API_KEY")
     parser.add_argument("--model", default=None, help="vision-capable model name")
     parser.add_argument("--timeout", type=float, default=120.0)
+    parser.add_argument("--trace", action="store_true", help="print live A/B/execution overlap events")
     parser.add_argument(
         "--allow-launch",
         action="append",
@@ -53,6 +54,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             run_id=args.run_id,
             journal_path=args.journal,
             max_actions_per_batch=args.max_actions_per_batch,
+            trace=(lambda line: print(line, flush=True)) if args.trace else None,
         )
         report = runtime.run(args.task, max_batches=args.max_batches)
     except (ModelError, DesktopSafetyError, ValueError, RuntimeError) as exc:
@@ -64,4 +66,3 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

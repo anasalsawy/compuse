@@ -4,7 +4,7 @@ from __future__ import annotations
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from compuse.coordinator import Coordinator
 from compuse.protocol import Action, ActionProposal, Origin
@@ -75,6 +75,7 @@ class DualLobeRuntime:
         journal_path: str | None = None,
         ttl: float = 30.0,
         max_actions_per_batch: int = 8,
+        trace: Callable[[str], None] | None = None,
     ) -> None:
         if not 1 <= max_actions_per_batch <= 8:
             raise ValueError("max_actions_per_batch must be between 1 and 8")
@@ -84,8 +85,20 @@ class DualLobeRuntime:
         self.run_id = run_id
         self.ttl = ttl
         self.max_actions_per_batch = max_actions_per_batch
+        self.trace = trace
+        self._trace_started_at = time.perf_counter()
         self.store = EventStore(journal_path if journal_path else ":memory:")
         self.coordinator = Coordinator(store=self.store)
+
+    def _trace(self, phase: str, **fields: object) -> None:
+        if self.trace is None:
+            return
+        elapsed_ms = (time.perf_counter() - self._trace_started_at) * 1000.0
+        details = " ".join(f"{key}={value}" for key, value in fields.items())
+        line = f"[{elapsed_ms:9.1f}ms] {phase}"
+        if details:
+            line += f" {details}"
+        self.trace(line)
 
     def _observe(self) -> RuntimeObservation:
         observation = self.adapter.observe()
@@ -98,6 +111,8 @@ class DualLobeRuntime:
     def _execute_batch(self, batch: BatchSpec, starting_observation: RuntimeObservation) -> BatchExecution:
         if not batch.preconditions.matches(starting_observation):
             raise StaleBatch(f"batch {batch.batch_id} preconditions do not match observation {starting_observation.revision}")
+
+        self._trace("EXEC", state="START", batch=batch.batch_id, actions=len(batch.actions))
 
         results: list[ActionExecution] = []
         uncertain = False
@@ -112,6 +127,7 @@ class DualLobeRuntime:
 
         for index, action in enumerate(batch.actions):
             action_started = time.perf_counter()
+            self._trace("EXEC", state="ACTION_START", batch=batch.batch_id, index=f"{index + 1}/{len(batch.actions)}", kind=action.kind)
             proposal = ActionProposal(
                 action_id=f"{batch.batch_id}-a{index}",
                 run_id=self.run_id,
@@ -154,6 +170,13 @@ class DualLobeRuntime:
                     elapsed_ms=elapsed,
                 )
                 results.append(action_result)
+                self._trace(
+                    "EXEC",
+                    state="ACTION_DONE" if performed else "ACTION_FAIL",
+                    batch=batch.batch_id,
+                    index=f"{index + 1}/{len(batch.actions)}",
+                    elapsed_ms=f"{elapsed:.1f}",
+                )
                 uncertain = uncertain or action_uncertain
                 if not performed:
                     failure_index = index
@@ -183,6 +206,7 @@ class DualLobeRuntime:
             "failure_index": failure_index,
             "actual_observation": actual.journal_view(),
         })
+        self._trace("EXEC", state="DONE" if ok else "INVALID", batch=batch.batch_id, verified=ok)
         return BatchExecution(
             batch_id=batch.batch_id,
             ok=ok,
@@ -223,8 +247,11 @@ class DualLobeRuntime:
         discarded = 0
         actions_executed = 0
         observation = self._observe()
+        self._trace("RUN", state="START", run_id=self.run_id, task=task)
         self._append("run_started", {"task": task, "observation": observation.journal_view()})
+        self._trace("A", state="PLAN_INITIAL_START")
         active = self.lobe_a.plan_initial(task, observation)
+        self._trace("A", state="PLAN_INITIAL_DONE", batch=active.batch_id if active else "none")
         if active is None:
             self._append("run_finished", {"status": "no_plan"})
             return RuntimeReport(
@@ -249,13 +276,39 @@ class DualLobeRuntime:
                 if active is None:
                     break
             transcript.append(f"execute {active.batch_id}: {len(active.actions)} action(s)")
+            self._trace("LOOP", state="ACTIVE", batch=active.batch_id, actions=len(active.actions))
+
+            def predict_next() -> BatchSpec | None:
+                self._trace("A", state="PREDICT_START", source=active.batch_id)
+                try:
+                    candidate = self.lobe_a.predict_next(task, active, observation)
+                except Exception as exc:
+                    self._trace("A", state="PREDICT_ERROR", source=active.batch_id, error=type(exc).__name__)
+                    raise
+                self._trace("A", state="PREDICT_DONE", source=active.batch_id, batch=candidate.batch_id if candidate else "none")
+                return candidate
+
+            def prepare_next() -> LobeDecision:
+                self._trace("B", state="PREPARE_START", source=active.batch_id, predicted_end=active.predicted_end.summary)
+                try:
+                    decision = self.lobe_b.prepare_next(task, active, observation)
+                except Exception as exc:
+                    self._trace("B", state="PREPARE_ERROR", source=active.batch_id, error=type(exc).__name__)
+                    raise
+                self._trace(
+                    "B",
+                    state="APPROVED" if decision.approved else "REJECTED",
+                    source=active.batch_id,
+                    batch=decision.batch.batch_id if decision.batch else "none",
+                )
+                return decision
 
             # All three operations are concurrent: the current batch moves the
             # machine while A and B prepare the following handoff.
             with ThreadPoolExecutor(max_workers=3, thread_name_prefix="compuse-lobe") as pool:
                 execution_future = pool.submit(self._execute_batch, active, observation)
-                a_future = pool.submit(self.lobe_a.predict_next, task, active, observation)
-                b_future = pool.submit(self.lobe_b.prepare_next, task, active, observation)
+                a_future = pool.submit(predict_next)
+                b_future = pool.submit(prepare_next)
                 execution = execution_future.result()
                 try:
                     a_candidate = a_future.result()
@@ -269,6 +322,7 @@ class DualLobeRuntime:
 
             actions_executed += len(execution.results)
             observation = execution.actual_observation
+            self._trace("BOUNDARY", state="OBSERVED", batch=active.batch_id, revision=observation.revision)
             if not execution.ok or execution.uncertain:
                 transcript.append(f"recovery after {active.batch_id}: {execution.error or 'verification failed'}")
                 self._append("speculation_invalidated", {
@@ -286,6 +340,7 @@ class DualLobeRuntime:
             if active.terminal:
                 terminal_executed = True
                 transcript.append(f"terminal batch completed: {active.batch_id}")
+                self._trace("RUN", state="TERMINAL", batch=active.batch_id)
                 break
 
             b_candidate = b_decision.batch if b_decision.approved else None
@@ -312,6 +367,7 @@ class DualLobeRuntime:
                     active = self.lobe_a.plan_initial(task, observation)
                 else:
                     active = b_candidate
+                    self._trace("HANDOFF", state="ACCEPTED", batch=active.batch_id, source=b_candidate.preconditions.source_batch_id)
 
             if active is None:
                 break
@@ -323,6 +379,7 @@ class DualLobeRuntime:
             "batches_discarded": discarded,
             "actions_executed": actions_executed,
         })
+        self._trace("RUN", state=status.upper(), batches=len([line for line in transcript if line.startswith("execute ")]), actions=actions_executed)
         return RuntimeReport(
             run_id=self.run_id,
             status=status,

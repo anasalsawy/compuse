@@ -15,6 +15,7 @@ dependencies = ["pydantic>=2.7,<3"]
 compuse = "compuse.app.cli:main"
 compuse-gui = "compuse.app.gui:main"
 compuse-agent = "compuse.app.agent_cli:main"
+compuse-dual-loop-demo = "compuse.app.dual_loop_demo:main"
 
 [project.optional-dependencies]
 test = ["pytest>=8", "pytest-cov>=5"]
