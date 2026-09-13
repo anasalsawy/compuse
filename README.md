@@ -1,6 +1,6 @@
-# Compuse
+# Tasker
 
-Compuse is a local-first desktop computer-use runtime with an explicit
+Tasker is a local-first desktop computer-use runtime with an explicit
 authorization and audit boundary. It now includes a first NeuralAgent-style
 Windows vertical slice: headed screen observation, typed physical input, an
 OpenAI-compatible vision planner, and a dual-lobe speculative handoff loop.
@@ -48,16 +48,16 @@ are injected internally into later planning without changing the user's task.
 ```powershell
 cd C:\Projects
 git clone --branch feat/neuralagent-dual-lobe --single-branch `
-  https://github.com/anasalsawy/compuse.git compuse
-cd compuse
+  https://github.com/anasalsawy/Tasker.git Tasker
+cd Tasker
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -e ".[desktop,test]"
-$env:COMPUSE_LLM_BASE_URL = "https://api.example.com/v1"
-$env:COMPUSE_LLM_API_KEY = "your-key"
-$env:COMPUSE_LLM_MODEL = "your-vision-model"
-compuse-agent "Open Chrome and navigate to example.com" `
+$env:Tasker_LLM_BASE_URL = "https://api.example.com/v1"
+$env:Tasker_LLM_API_KEY = "your-key"
+$env:Tasker_LLM_MODEL = "your-vision-model"
+Tasker-agent "Open Chrome and navigate to example.com" `
   --architecture predictive --lobe-b-profile base --live --trace
 ```
 
@@ -74,7 +74,7 @@ Run the deterministic comparison first. It uses the real runtime classes on
 the same multi-stage task, prints timestamps, and performs no desktop input:
 
 ```powershell
-compuse-dual-loop-demo --scenario complex --architecture compare `
+Tasker-dual-loop-demo --scenario complex --architecture compare `
   --lobe-b-profile gatekeeper
 ```
 
@@ -98,9 +98,9 @@ For the live agent, use `--architecture predictive` or
 explicitly:
 
 ```powershell
-compuse-agent "Open Chrome and navigate to example.com" `
+Tasker-agent "Open Chrome and navigate to example.com" `
   --architecture predictive --lobe-b-profile base --live --trace
-compuse-agent "Open Chrome and navigate to example.com" `
+Tasker-agent "Open Chrome and navigate to example.com" `
   --architecture screen-aware --lobe-b-profile screen-aware --live --trace
 ```
 
@@ -112,7 +112,7 @@ For the screen-aware loop, choose the screen-aware architecture and select the
 profile manually:
 
 ```powershell
-compuse-agent "Open Chrome and navigate to example.com" `
+Tasker-agent "Open Chrome and navigate to example.com" `
   --architecture screen-aware --lobe-b-profile screen-aware --live --trace
 ```
 
