@@ -1,15 +1,18 @@
 # PyInstaller spec: compuse CLI (compuse.exe) and GUI (CompuseConsole.exe)
+# Paths are anchored to the repo root so the spec can live in packaging/.
+import os
 from PyInstaller.utils.hooks import collect_data_files
 
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(SPECPATH)))
 datas = collect_data_files("compuse")
 
-for (name, path, console) in (
+for (name, relfile, console) in (
     ("compuse", "compuse/app/cli.py", True),
     ("CompuseConsole", "compuse/app/gui.py", False),
 ):
     a = Analysis(
-        [path],
-        pathex=[],
+        [os.path.join(ROOT, relfile)],
+        pathex=[ROOT],
         binaries=[],
         datas=datas,
         hiddenimports=["pydantic"],
