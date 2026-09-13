@@ -4,6 +4,7 @@ from __future__ import annotations
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from threading import Event, Lock, Thread
 from typing import Any, Callable, Protocol
 
 from compuse.coordinator import Coordinator
@@ -17,6 +18,7 @@ from .contracts import (
     LobeDecision,
     RuntimeObservation,
     RuntimeReport,
+    ScreenAssessment,
 )
 
 
@@ -47,6 +49,26 @@ class LobeB(Protocol):
         task: str,
         active_batch: BatchSpec,
         observation: RuntimeObservation,
+    ) -> LobeDecision: ...
+
+
+class ScreenAwareLobeB(Protocol):
+    """Independent B interface for the continuous-awareness architecture."""
+
+    def inspect_screen(
+        self,
+        task: str,
+        active_batch: BatchSpec,
+        observation: RuntimeObservation,
+    ) -> ScreenAssessment: ...
+
+    def approve_next(
+        self,
+        task: str,
+        active_batch: BatchSpec,
+        candidate: BatchSpec,
+        observation: RuntimeObservation,
+        assessment: ScreenAssessment,
     ) -> LobeDecision: ...
 
 
@@ -87,6 +109,7 @@ class DualLobeRuntime:
         self.max_actions_per_batch = max_actions_per_batch
         self.trace = trace
         self._trace_started_at = time.perf_counter()
+        self._observation_lock = Lock()
         self.store = EventStore(journal_path if journal_path else ":memory:")
         self.coordinator = Coordinator(store=self.store)
 
@@ -101,14 +124,25 @@ class DualLobeRuntime:
         self.trace(line)
 
     def _observe(self) -> RuntimeObservation:
-        observation = self.adapter.observe()
+        # Capture calls are serialized, while capture still overlaps planning
+        # and physical input.  This protects adapters whose revision counter
+        # is not internally thread-safe.
+        with self._observation_lock:
+            observation = self.adapter.observe()
         # The adapter owns capture; the runtime owns the durable run identity.
         return observation.model_copy(update={"run_id": self.run_id})
 
     def _append(self, event_type: str, payload: dict[str, Any]) -> None:
         self.store.append(self.run_id, event_type, payload, datetime.now(timezone.utc).isoformat())
 
-    def _execute_batch(self, batch: BatchSpec, starting_observation: RuntimeObservation) -> BatchExecution:
+    def _execute_batch(
+        self,
+        batch: BatchSpec,
+        starting_observation: RuntimeObservation,
+        *,
+        abort_event: Event | None = None,
+        abort_reason: Callable[[], str] | None = None,
+    ) -> BatchExecution:
         if not batch.preconditions.matches(starting_observation):
             raise StaleBatch(f"batch {batch.batch_id} preconditions do not match observation {starting_observation.revision}")
 
@@ -126,6 +160,12 @@ class DualLobeRuntime:
         })
 
         for index, action in enumerate(batch.actions):
+            if abort_event is not None and abort_event.is_set():
+                failure_index = index
+                uncertain = True
+                error = abort_reason() if abort_reason is not None else "screen watchdog interrupted execution"
+                self._trace("EXEC", state="INTERRUPTED", batch=batch.batch_id, index=f"{index + 1}/{len(batch.actions)}", reason=error)
+                break
             action_started = time.perf_counter()
             self._trace("EXEC", state="ACTION_START", batch=batch.batch_id, index=f"{index + 1}/{len(batch.actions)}", kind=action.kind)
             proposal = ActionProposal(
@@ -391,4 +431,294 @@ class DualLobeRuntime:
         )
 
 
-__all__ = ["DesktopAdapter", "DualLobeRuntime", "LobeA", "LobeB", "StaleBatch"]
+class _ScreenState:
+    def __init__(self) -> None:
+        self.lock = Lock()
+        self.latest_observation: RuntimeObservation | None = None
+        self.latest_assessment: ScreenAssessment | None = None
+
+    def snapshot(self) -> tuple[RuntimeObservation | None, ScreenAssessment | None]:
+        with self.lock:
+            return self.latest_observation, self.latest_assessment
+
+
+class _ScreenAssessmentJob:
+    """One daemonized B assessment; at most one is in flight."""
+
+    def __init__(self, screen_lobe: ScreenAwareLobeB, task: str, active: BatchSpec, observation: RuntimeObservation) -> None:
+        self.done = Event()
+        self.assessment: ScreenAssessment | None = None
+        self.error: Exception | None = None
+
+        def run() -> None:
+            try:
+                self.assessment = screen_lobe.inspect_screen(task, active, observation)
+            except Exception as exc:  # noqa: BLE001 - caller converts B failure to unsafe
+                self.error = exc
+            finally:
+                self.done.set()
+
+        Thread(target=run, name="compuse-screen-assessment", daemon=True).start()
+
+    def result(self) -> ScreenAssessment:
+        if self.error is not None:
+            raise self.error
+        if self.assessment is None:
+            raise RuntimeError("screen assessment completed without a result")
+        return self.assessment
+
+
+class ScreenAwareDualLobeRuntime(DualLobeRuntime):
+    """Dual-lobe variant with a continuously running B screen watchdog.
+
+    A still prepares the next batch while the current batch executes.  B no
+    longer spends its critical path preparing that batch; it continuously
+    captures the desktop, assesses the current screen, interrupts unsafe
+    execution at the next action boundary, and gates A's handoff.
+    """
+
+    def __init__(
+        self,
+        *,
+        screen_lobe: ScreenAwareLobeB,
+        screen_poll_interval: float = 0.05,
+        **kwargs: Any,
+    ) -> None:
+        if screen_poll_interval <= 0:
+            raise ValueError("screen_poll_interval must be positive")
+        # The inherited constructor stores the common adapter/coordinator
+        # machinery and expects a B object.  Screen-aware B has a different
+        # protocol, but this subclass replaces the inherited run loop, so it
+        # is only passed through to satisfy that shared initialization.
+        kwargs["lobe_b"] = screen_lobe
+        super().__init__(**kwargs)
+        self.screen_lobe = screen_lobe
+        self.screen_poll_interval = screen_poll_interval
+
+    def _start_screen_watch(
+        self,
+        *,
+        task: str,
+        active_ref: list[BatchSpec],
+        active_lock: Lock,
+        state: _ScreenState,
+        stop_event: Event,
+        interrupt_event: Event,
+        interrupt_reason: list[str],
+    ) -> Thread:
+        def watch() -> None:
+            pending: _ScreenAssessmentJob | None = None
+            last_hash: str | None = None
+            while not stop_event.is_set():
+                current = self._observe()
+                with state.lock:
+                    state.latest_observation = current
+                self._trace("B", state="SCREEN_UPDATE", revision=current.revision)
+
+                if pending is not None and pending.done.is_set():
+                    try:
+                        assessment = pending.result()
+                    except Exception as exc:  # noqa: BLE001 - B fails closed
+                        assessment = ScreenAssessment(
+                            observation_revision=current.revision,
+                            status="unsafe",
+                            reason=f"screen assessment failed: {exc}",
+                        )
+                    with state.lock:
+                        state.latest_assessment = assessment
+                    self._trace(
+                        "B",
+                        state="SCREEN_ASSESSMENT",
+                        status=assessment.status,
+                        revision=assessment.observation_revision,
+                    )
+                    if assessment.status == "unsafe":
+                        interrupt_reason[:] = [assessment.reason]
+                        interrupt_event.set()
+                    pending = None
+
+                with active_lock:
+                    active = active_ref[0]
+                if pending is None and active is not None and current.screen_sha256 != last_hash:
+                    pending = _ScreenAssessmentJob(self.screen_lobe, task, active, current)
+                    last_hash = current.screen_sha256
+                stop_event.wait(self.screen_poll_interval)
+
+        watcher = Thread(target=watch, name="compuse-screen-watch", daemon=True)
+        watcher.start()
+        return watcher
+
+    def run(self, task: str, *, max_batches: int = 32) -> RuntimeReport:
+        if not task.strip():
+            raise ValueError("task must not be empty")
+        if max_batches < 1:
+            raise ValueError("max_batches must be positive")
+
+        transcript: list[str] = []
+        discarded = 0
+        actions_executed = 0
+        observation = self._observe()
+        self._trace("RUN", state="START", run_id=self.run_id, architecture="screen-aware", task=task)
+        self._append("run_started", {"task": task, "architecture": "screen-aware", "observation": observation.journal_view()})
+        self._trace("A", state="PLAN_INITIAL_START")
+        active = self.lobe_a.plan_initial(task, observation)
+        self._trace("A", state="PLAN_INITIAL_DONE", batch=active.batch_id if active else "none")
+        if active is None:
+            self._append("run_finished", {"status": "no_plan"})
+            return RuntimeReport(
+                run_id=self.run_id,
+                status="no_plan",
+                batches_executed=0,
+                batches_discarded=0,
+                actions_executed=0,
+                transcript=(),
+                final_observation=observation,
+            )
+        if not active.preconditions.matches(observation):
+            raise StaleBatch("initial batch does not match the starting observation")
+
+        active_ref = [active]
+        active_lock = Lock()
+        state = _ScreenState()
+        stop_event = Event()
+        interrupt_event = Event()
+        interrupt_reason = ["screen watchdog interrupted execution"]
+        watcher = self._start_screen_watch(
+            task=task,
+            active_ref=active_ref,
+            active_lock=active_lock,
+            state=state,
+            stop_event=stop_event,
+            interrupt_event=interrupt_event,
+            interrupt_reason=interrupt_reason,
+        )
+        terminal_executed = False
+        try:
+            for _batch_number in range(max_batches):
+                with active_lock:
+                    active_ref[0] = active
+                if not active.preconditions.matches(observation):
+                    discarded += 1
+                    transcript.append(f"discard {active.batch_id}: actual state no longer matches its preconditions")
+                    self._append("batch_discarded", {"batch_id": active.batch_id, "reason": "stale_before_execution"})
+                    active = self.lobe_a.plan_initial(task, observation)
+                    if active is None:
+                        break
+                    continue
+
+                transcript.append(f"execute {active.batch_id}: {len(active.actions)} action(s)")
+                self._trace("LOOP", state="ACTIVE", batch=active.batch_id, actions=len(active.actions))
+
+                def predict_next() -> BatchSpec | None:
+                    self._trace("A", state="PREDICT_START", source=active.batch_id)
+                    candidate = self.lobe_a.predict_next(task, active, observation)
+                    self._trace("A", state="PREDICT_DONE", source=active.batch_id, batch=candidate.batch_id if candidate else "none")
+                    return candidate
+
+                with ThreadPoolExecutor(max_workers=2, thread_name_prefix="compuse-action") as pool:
+                    execution_future = pool.submit(
+                        self._execute_batch,
+                        active,
+                        observation,
+                        abort_event=interrupt_event,
+                        abort_reason=lambda: interrupt_reason[0],
+                    )
+                    a_future = pool.submit(predict_next)
+                    execution = execution_future.result()
+                    try:
+                        a_candidate = a_future.result()
+                    except Exception as exc:  # noqa: BLE001 - prediction can be retried from reality
+                        a_candidate = None
+                        transcript.append(f"lobe A prediction unavailable: {exc}")
+
+                actions_executed += len(execution.results)
+                observation = execution.actual_observation
+                self._trace("BOUNDARY", state="OBSERVED", batch=active.batch_id, revision=observation.revision)
+
+                if interrupt_event.is_set():
+                    reason = interrupt_reason[0]
+                    transcript.append(f"screen watchdog interrupted {active.batch_id}: {reason}")
+                    self._append("screen_interrupted", {"batch_id": active.batch_id, "reason": reason})
+                    self._trace("RUN", state="SCREEN_INTERRUPTED", reason=reason)
+                    break
+                if not execution.ok or execution.uncertain:
+                    transcript.append(f"recovery after {active.batch_id}: {execution.error or 'verification failed'}")
+                    self._append("speculation_invalidated", {"batch_id": active.batch_id, "reason": execution.error or "execution_not_verified"})
+                    active = self.lobe_a.plan_initial(task, observation)
+                    if active is None:
+                        break
+                    discarded += 1
+                    continue
+                if active.terminal:
+                    terminal_executed = True
+                    transcript.append(f"terminal batch completed: {active.batch_id}")
+                    self._trace("RUN", state="TERMINAL", batch=active.batch_id)
+                    break
+
+                if a_candidate is None or not self._valid_next_batch(active, a_candidate):
+                    discarded += 1
+                    transcript.append(f"discard speculative handoff after {active.batch_id}: A candidate failed contract")
+                    self._append("batch_discarded", {"batch_id": a_candidate.batch_id if a_candidate else None, "source_batch_id": active.batch_id, "reason": "candidate_contract_failed"})
+                    active = self.lobe_a.plan_initial(task, observation)
+                    if active is None:
+                        break
+                    continue
+
+                _, latest_assessment = state.snapshot()
+                assessment = latest_assessment
+                if assessment is None or assessment.observation_revision < observation.revision:
+                    assessment = self.screen_lobe.inspect_screen(task, active, observation)
+                    with state.lock:
+                        state.latest_assessment = assessment
+                    self._trace(
+                        "B",
+                        state="SCREEN_ASSESSMENT",
+                        status=assessment.status,
+                        revision=assessment.observation_revision,
+                    )
+                self._trace("B", state="HANDOFF_CHECK", status=assessment.status, revision=assessment.observation_revision)
+                decision = self.screen_lobe.approve_next(task, active, a_candidate, observation, assessment)
+                if (
+                    decision.approved
+                    and decision.batch is not None
+                    and assessment.status == "stable"
+                    and decision.batch == a_candidate
+                    and a_candidate.preconditions.matches(observation)
+                ):
+                    active = a_candidate
+                    self._trace("HANDOFF", state="ACCEPTED", batch=active.batch_id, source=active.preconditions.source_batch_id)
+                else:
+                    discarded += 1
+                    transcript.append(f"discard screen-aware handoff after {active.batch_id}: {decision.reason}")
+                    self._append("batch_discarded", {"batch_id": a_candidate.batch_id, "source_batch_id": active.batch_id, "reason": decision.reason})
+                    active = self.lobe_a.plan_initial(task, observation)
+                    if active is None:
+                        break
+        finally:
+            stop_event.set()
+            watcher.join(timeout=max(1.0, self.screen_poll_interval * 4))
+
+        status = "completed" if terminal_executed else ("screen_interrupted" if interrupt_event.is_set() else ("no_next_plan" if active is None else "batch_limit"))
+        batches_executed = len([line for line in transcript if line.startswith("execute ")])
+        self._append("run_finished", {"status": status, "batches_executed": batches_executed, "batches_discarded": discarded, "actions_executed": actions_executed})
+        self._trace("RUN", state=status.upper(), batches=batches_executed, actions=actions_executed)
+        return RuntimeReport(
+            run_id=self.run_id,
+            status=status,
+            batches_executed=batches_executed,
+            batches_discarded=discarded,
+            actions_executed=actions_executed,
+            transcript=tuple(transcript),
+            final_observation=observation,
+        )
+
+
+__all__ = [
+    "DesktopAdapter",
+    "DualLobeRuntime",
+    "LobeA",
+    "LobeB",
+    "ScreenAwareDualLobeRuntime",
+    "ScreenAwareLobeB",
+    "StaleBatch",
+]

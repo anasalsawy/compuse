@@ -10,8 +10,17 @@ from .contracts import (
     RiskClass,
     RuntimeObservation,
     RuntimeReport,
+    ScreenAssessment,
 )
-from .runtime import DualLobeRuntime, LobeA, LobeB, DesktopAdapter, StaleBatch
+from .runtime import (
+    DualLobeRuntime,
+    LobeA,
+    LobeB,
+    DesktopAdapter,
+    ScreenAwareDualLobeRuntime,
+    ScreenAwareLobeB,
+    StaleBatch,
+)
 
 __all__ = [
     "ActionExecution",
@@ -27,5 +36,8 @@ __all__ = [
     "RiskClass",
     "RuntimeObservation",
     "RuntimeReport",
+    "ScreenAssessment",
+    "ScreenAwareDualLobeRuntime",
+    "ScreenAwareLobeB",
     "StaleBatch",
 ]

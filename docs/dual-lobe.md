@@ -20,7 +20,52 @@ compuse-agent "Open Chrome and navigate to example.com" --live
 but refuses physical input, so a model call cannot accidentally move the user's
 mouse or type into an application.
 
-## The pipeline
+## Two comparable pipelines
+
+Compuse exposes both architectures so their behavior can be measured on the
+same task.
+
+### Predictive handoff
+
+```mermaid
+flowchart TD
+    O[Fresh observation] --> A[Lobe A active batch]
+    A --> X[Serialized execution]
+    X -. overlaps .-> PA[A predicts next]
+    X -. overlaps .-> PB[B prepares next from A end]
+    X --> V[Fresh boundary observation]
+    PA --> G[B handoff gate]
+    PB --> G
+    V --> G
+    G -->|valid| N[Next batch]
+    G -->|stale or uncertain| R[Replan from reality]
+    N --> X
+```
+
+### Continuous screen-aware watchdog
+
+```mermaid
+flowchart TD
+    O[Fresh observation] --> A[Lobe A active batch]
+    A --> X[Serialized execution]
+    X -. overlaps .-> P[A predicts next]
+    X --> V[Fresh boundary observation]
+    S[B continuously captures screen] --> Q[B assesses latest screen]
+    Q -->|unsafe| I[Interrupt at next action boundary]
+    Q --> G[B handoff gate]
+    P --> G
+    V --> G
+    G -->|stable and grounded| N[Next batch]
+    G -->|changed or uncertain| R[Replan from reality]
+    N --> X
+```
+
+In the second design, B is no longer a second batch planner. It is a live
+independent observer and safety gate. It may interrupt before the next physical
+action when the screen becomes unsafe, and it may reject A's predicted batch
+when the fresh screen does not support it.
+
+## The predictive pipeline
 
 ```mermaid
 flowchart TD
@@ -50,6 +95,11 @@ serialized through the Coordinator. B's next batch is eligible only when:
 If any check fails, the predicted batch is thrown away. This is the mechanism
 that provides fast continuous movement without turning a wrong prediction into
 blind clicking or typing.
+
+The screen-aware pipeline applies the same final reality check, but replaces B's
+critical-path preparation with continuous capture and assessment. The capture
+loop remains active while A plans and while actions execute; vision assessment
+is bounded to one in-flight request so it cannot grow an unbounded backlog.
 
 ## Batch contract
 

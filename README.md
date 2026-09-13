@@ -32,16 +32,36 @@ refuses mouse, keyboard, launch, file, and browser mutations.
 
 ## Prove the loop from a shell
 
-Run the deterministic proof first. It uses the real `DualLobeRuntime`, prints
-timestamps for execution/A prediction/B preparation, and performs no desktop
-input:
+Run the deterministic comparison first. It uses both real runtime classes on
+the same task, prints timestamps, and performs no desktop input:
 
 ```powershell
 compuse-dual-loop-demo
 ```
 
-The final line must be `CONTINUOUS_HANDOFF=PASS`. To see the same trace while
-using the real model and desktop adapter, add `--trace` to `compuse-agent`.
+The output compares two designs:
+
+- `predictive`: A predicts the next batch while the current batch executes and
+  B independently prepares the handoff from A's predicted end.
+- `screen-aware`: A predicts the next batch while B continuously samples and
+  assesses the screen, interrupts unsafe execution at an action boundary, and
+  gates the handoff against the fresh screen.
+
+Run either proof alone with `--architecture predictive` or
+`--architecture screen-aware`. Each successful proof ends in
+`CONTINUOUS_HANDOFF=PASS`; the comparison ends in `COMPARISON=PASS`.
+
+To see either architecture use the real model and desktop adapter, add
+`--trace` and select the architecture explicitly:
+
+```powershell
+compuse-agent "Open Chrome and navigate to example.com" --architecture predictive --live --trace
+compuse-agent "Open Chrome and navigate to example.com" --architecture screen-aware --live --trace
+```
+
+The screen-aware mode intentionally limits B to one in-flight vision
+assessment while capture continues. Sending every captured frame to a model
+would create a queue and increase latency instead of improving awareness.
 
 ## Portable core
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -153,6 +153,14 @@ class LobeDecision(ContractModel):
         if self.approved and self.batch is None:
             raise ValueError("an approved decision must include a batch")
         return self
+
+
+class ScreenAssessment(ContractModel):
+    """Lobe B's current assessment of the live desktop stream."""
+
+    observation_revision: int = Field(ge=0)
+    status: Literal["stable", "changed", "unsafe"]
+    reason: str = Field(min_length=1, max_length=2000)
 
 
 class ActionExecution(ContractModel):

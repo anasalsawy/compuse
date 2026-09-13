@@ -12,7 +12,7 @@ from compuse.agent.contracts import (
     RuntimeObservation,
 )
 from compuse.agent.runtime import DualLobeRuntime
-from compuse.app.dual_loop_demo import run_demo
+from compuse.app.dual_loop_demo import run_demo, run_screen_aware_demo
 from compuse.protocol import Wait
 
 
@@ -164,3 +164,15 @@ def test_shell_demo_proves_real_runtime_overlap():
     assert lobe_a.prediction_started_during_execution is True
     assert lobe_b.prepare_started_during_execution is True
     assert lobe_b.saw_predicted_end is True
+
+
+def test_screen_aware_demo_runs_continuous_watchdog_and_handoff():
+    report, adapter, lobe_a, screen_lobe = run_screen_aware_demo()
+
+    assert report.status == "completed"
+    assert adapter.marker == "done"
+    assert lobe_a.prediction_started_during_execution is True
+    assert screen_lobe.screen_updates > 0
+    assert screen_lobe.screen_assessments > 0
+    assert screen_lobe.handoff_checks > 0
+    assert screen_lobe.saw_expected_transition is True

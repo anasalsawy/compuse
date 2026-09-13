@@ -13,7 +13,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from .contracts import BatchSpec, LobeDecision, RuntimeObservation
+from .contracts import BatchSpec, LobeDecision, RuntimeObservation, ScreenAssessment
 
 
 class ModelError(RuntimeError):
@@ -107,6 +107,21 @@ not concrete, the next action is not grounded, or the sequence crosses an
 uncertain transition. Use approved=false and batch=null when rejecting.
 source_lobe must be \"B\". B is allowed to challenge A; never approve a guess."""
 
+_SCREEN_SYSTEM = """You are Lobe B in Compuse's continuous screen-awareness mode.
+Return JSON only with observation_revision, status, and reason. Inspect the
+current screenshot and metadata independently of Lobe A. Use status=stable
+when the visible desktop is a safe continuation of the active batch, changed
+when it is a normal expected transition, and unsafe when focus, application,
+modal state, or visible content makes the next action unreliable. Never claim
+stable from a guess; an unknown screen is unsafe."""
+
+_SCREEN_GATE_SYSTEM = """You are Lobe B, the independent screen-awareness gate in
+Compuse. Return JSON only matching LobeDecision. Review A's exact proposed next
+batch against the freshly observed screen and B's assessment. Approve only if
+the screen is stable, the candidate's source_batch_id is exact, and its
+preconditions are grounded in the observation. If approved, return the exact
+candidate batch unchanged. Reject uncertainty or any mismatch."""
+
 
 def _batch_prompt(task: str, observation: RuntimeObservation, active: BatchSpec | None = None) -> str:
     payload: dict[str, Any] = {
@@ -115,6 +130,26 @@ def _batch_prompt(task: str, observation: RuntimeObservation, active: BatchSpec 
     }
     if active is not None:
         payload["active_batch"] = active.model_dump(mode="json")
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _screen_prompt(
+    task: str,
+    observation: RuntimeObservation,
+    active: BatchSpec,
+    *,
+    candidate: BatchSpec | None = None,
+    assessment: ScreenAssessment | None = None,
+) -> str:
+    payload: dict[str, Any] = {
+        "task": task,
+        "observation": observation.model_dump(mode="json", exclude={"screenshot_data_url"}),
+        "active_batch": active.model_dump(mode="json"),
+    }
+    if candidate is not None:
+        payload["candidate_next_batch"] = candidate.model_dump(mode="json")
+    if assessment is not None:
+        payload["screen_assessment"] = assessment.model_dump(mode="json")
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
@@ -149,4 +184,51 @@ class ModelLobeB:
         return LobeDecision.model_validate(raw, strict=False)
 
 
-__all__ = ["ModelError", "ModelLobeA", "ModelLobeB", "OpenAICompatibleClient"]
+class ModelScreenLobeB:
+    """Vision-backed B for the continuous screen-awareness runtime."""
+
+    def __init__(self, client: OpenAICompatibleClient) -> None:
+        self.client = client
+
+    def inspect_screen(
+        self,
+        task: str,
+        active_batch: BatchSpec,
+        observation: RuntimeObservation,
+    ) -> ScreenAssessment:
+        raw = self.client.complete_json(
+            system=_SCREEN_SYSTEM,
+            user_text=_screen_prompt(task, observation, active_batch),
+            observation=observation,
+        )
+        return ScreenAssessment.model_validate(raw, strict=False)
+
+    def approve_next(
+        self,
+        task: str,
+        active_batch: BatchSpec,
+        candidate: BatchSpec,
+        observation: RuntimeObservation,
+        assessment: ScreenAssessment,
+    ) -> LobeDecision:
+        raw = self.client.complete_json(
+            system=_SCREEN_GATE_SYSTEM,
+            user_text=_screen_prompt(
+                task,
+                observation,
+                active_batch,
+                candidate=candidate,
+                assessment=assessment,
+            ),
+            observation=observation,
+        )
+        return LobeDecision.model_validate(raw, strict=False)
+
+
+__all__ = [
+    "ModelError",
+    "ModelLobeA",
+    "ModelLobeB",
+    "ModelScreenLobeB",
+    "OpenAICompatibleClient",
+]
