@@ -22,11 +22,25 @@ def _cmd_demo(_: argparse.Namespace) -> int:
     return 0
 
 
+def _load_action(raw: str) -> dict:
+    if raw.startswith("@"):
+        from pathlib import Path
+
+        path = Path(raw[1:])
+        if not path.exists():
+            raise ValueError(f"action file not found: {path}")
+        raw = path.read_text(encoding="utf-8")
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid action JSON: {exc}") from exc
+
+
 def _cmd_authorize(args: argparse.Namespace) -> int:
     try:
-        payload = json.loads(args.action)
-    except json.JSONDecodeError as exc:
-        print(f"error: invalid action JSON: {exc}", file=sys.stderr)
+        payload = _load_action(args.action)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 2
     try:
         result = authorize(payload, run_id=args.run_id, ttl=args.ttl)

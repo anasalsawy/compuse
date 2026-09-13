@@ -40,6 +40,18 @@ def test_cli_authorize_bad_json(capsys):
     assert main(["authorize", "{nope"]) != 0
 
 
+def test_cli_authorize_from_file(tmp_path, capsys):
+    payload = tmp_path / "action.json"
+    payload.write_text(json.dumps({"kind": "type", "text": "from file"}), encoding="utf-8")
+    assert main(["authorize", f"@{payload}"]) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["approved"]["text"] == "from file"
+
+
+def test_cli_authorize_from_missing_file(capsys):
+    assert main(["authorize", "@/nonexistent/action.json"]) != 0
+
+
 def test_cli_journal_roundtrip(tmp_path):
     path = str(tmp_path / "journal.db")
     assert main(["journal", path, "--verify", "--run-id", "r"]) == 0
