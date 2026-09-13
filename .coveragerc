@@ -1,0 +1,8 @@
+[run]
+omit =
+    compuse/__main__.py
+    compuse/app/browser.py
+    compuse/app/desktop.py
+    compuse/app/agent_cli.py
+    compuse/agent/llm.py
+
