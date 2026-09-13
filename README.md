@@ -1,32 +1,42 @@
 # Compuse
 
-Compuse is a safety-first, local-first coordination core for a future Windows computer-use agent. This repository intentionally ships a **portable model-free foundation**, not the complete Windows product described in `plan.md`.
+Compuse is a safety-first, local-first coordination core for a future Windows computer-use agent. This repository intentionally ships a **portable, model-free foundation**, not a complete Windows automation product.
 
-## Current implementation
+## Current status
+
+Implemented and tested:
 
 - Strict Pydantic protocol models and discriminated actions.
-- Observation- and coordinate-space-bound, expiring, single-use permits.
-- Coordinator-owned policy checks and thread-safe in-process mutation boundary.
-- SQLite WAL event journal with FULL synchronous mode and SHA-256 per-run hash chains.
-- Explicit rejection of environment content and provider output as authority.
+- Observation-, coordinate-space-, policy-, and action-bound permit validation.
+- Single-use, expiring permits with an in-process mutation boundary.
+- SQLite WAL event journaling with full synchronous mode and SHA-256 per-run hash chains.
+- Automated Python tests.
 
-The coordinator authorizes and records actions; it does not inject input, launch programs, browse, use Electron, process voice, or claim verification. Those capabilities remain planned or unsupported.
+Not implemented:
 
-## Development
+- Windows native helper, UI Automation, Notepad workflow, process/window identity, session/input-desktop checks, and physical input.
+- Durable run/action/permit state, leases, restart recovery, and unknown-result reconciliation.
+- Browser, voice, provider/model, Electron, screenshot, installer, and signing integrations.
 
-Requires Python 3.11+.
+This is not course-scheduling software and does not implement course import, scheduling, conflict detection, or calendar export.
+
+## Installation and tests
+
+Requires Python 3.11 or newer.
 
 ```bash
-python -m venv .venv
-. .venv/bin/activate       # Windows: .venv\\Scripts\\Activate.ps1
 python -m pip install -e '.[test]'
-pytest -q
+python -m pytest -ra
 ```
 
-A minimal flow constructs an `Observation`, creates an `ActionProposal`, issues a permit, consumes it, dispatches the returned typed action through a separately implemented executor, then calls `release(permit_id)`.
+The current test suite is portable and does not prove Windows behavior.
 
 ## Safety boundary
 
-`consume` is not execution and does not prove success. A real integration must capture post-action state, perform independent deterministic verification, and record recovery/unknown outcomes. Never use this prototype with production credentials or unattended desktop mutation.
+`Coordinator.consume()` authorizes a typed action; it does not execute input or prove success. A future Windows integration must capture post-action state, independently verify the intended result, and record failure or unknown outcomes. Do not use this prototype with production credentials or unattended desktop mutation.
 
-See `plan.md` for the authoritative target architecture and `docs/supported-capabilities.md` for the current capability matrix.
+See [`docs/supported-capabilities.md`](docs/supported-capabilities.md) for the conservative capability matrix and [`plan.md`](plan.md) for the broader design direction.
+
+## License
+
+See [`LICENSE`](LICENSE).
