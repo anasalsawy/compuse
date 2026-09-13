@@ -508,7 +508,7 @@ class ScreenAwareDualLobeRuntime(DualLobeRuntime):
     ) -> Thread:
         def watch() -> None:
             pending: _ScreenAssessmentJob | None = None
-            last_hash: str | None = None
+            last_key: tuple[str, str] | None = None
             while not stop_event.is_set():
                 current = self._observe()
                 with state.lock:
@@ -539,9 +539,10 @@ class ScreenAwareDualLobeRuntime(DualLobeRuntime):
 
                 with active_lock:
                     active = active_ref[0]
-                if pending is None and active is not None and current.screen_sha256 != last_hash:
+                current_key = (active.batch_id, current.screen_sha256) if active is not None else None
+                if pending is None and active is not None and current_key != last_key:
                     pending = _ScreenAssessmentJob(self.screen_lobe, task, active, current)
-                    last_hash = current.screen_sha256
+                    last_key = current_key
                 stop_event.wait(self.screen_poll_interval)
 
         watcher = Thread(target=watch, name="compuse-screen-watch", daemon=True)

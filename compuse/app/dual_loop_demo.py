@@ -27,7 +27,7 @@ def _observation(revision: int, marker: str) -> RuntimeObservation:
         coordinate_space_id="demo-screen:100x100",
         foreground_window="Compuse Dual-Lobe Demo",
         visible_markers=(marker,),
-        screen_sha256=("0" if revision % 2 else "1") * 64,
+        screen_sha256=("0" if marker == "home" else "1") * 64,
     )
 
 
