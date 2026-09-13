@@ -4,6 +4,7 @@ from __future__ import annotations
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread
 from typing import Any, Callable, Protocol
 
@@ -442,32 +443,6 @@ class _ScreenState:
             return self.latest_observation, self.latest_assessment
 
 
-class _ScreenAssessmentJob:
-    """One daemonized B assessment; at most one is in flight."""
-
-    def __init__(self, screen_lobe: ScreenAwareLobeB, task: str, active: BatchSpec, observation: RuntimeObservation) -> None:
-        self.done = Event()
-        self.assessment: ScreenAssessment | None = None
-        self.error: Exception | None = None
-
-        def run() -> None:
-            try:
-                self.assessment = screen_lobe.inspect_screen(task, active, observation)
-            except Exception as exc:  # noqa: BLE001 - caller converts B failure to unsafe
-                self.error = exc
-            finally:
-                self.done.set()
-
-        Thread(target=run, name="compuse-screen-assessment", daemon=True).start()
-
-    def result(self) -> ScreenAssessment:
-        if self.error is not None:
-            raise self.error
-        if self.assessment is None:
-            raise RuntimeError("screen assessment completed without a result")
-        return self.assessment
-
-
 class ScreenAwareDualLobeRuntime(DualLobeRuntime):
     """Dual-lobe variant with a continuously running B screen watchdog.
 
@@ -507,43 +482,91 @@ class ScreenAwareDualLobeRuntime(DualLobeRuntime):
         interrupt_reason: list[str],
     ) -> Thread:
         def watch() -> None:
-            pending: _ScreenAssessmentJob | None = None
-            last_key: tuple[str, str] | None = None
-            while not stop_event.is_set():
-                current = self._observe()
-                with state.lock:
-                    state.latest_observation = current
-                self._trace("B", state="SCREEN_UPDATE", revision=current.revision)
+            analysis_queue: Queue[tuple[BatchSpec, RuntimeObservation] | None] = Queue(maxsize=1)
+            result_queue: Queue[tuple[int, ScreenAssessment | None, Exception | None]] = Queue(maxsize=1)
+            analysis_thread_stop = Event()
 
-                if pending is not None and pending.done.is_set():
+            def analyze() -> None:
+                while not analysis_thread_stop.is_set():
                     try:
-                        assessment = pending.result()
-                    except Exception as exc:  # noqa: BLE001 - B fails closed
-                        assessment = ScreenAssessment(
-                            observation_revision=current.revision,
-                            status="unsafe",
-                            reason=f"screen assessment failed: {exc}",
+                        item = analysis_queue.get(timeout=0.1)
+                    except Empty:
+                        continue
+                    if item is None:
+                        break
+                    active_for_analysis, observation_for_analysis = item
+                    assessment: ScreenAssessment | None = None
+                    error: Exception | None = None
+                    try:
+                        assessment = self.screen_lobe.inspect_screen(
+                            task,
+                            active_for_analysis,
+                            observation_for_analysis,
                         )
-                    with state.lock:
-                        state.latest_assessment = assessment
-                    self._trace(
-                        "B",
-                        state="SCREEN_ASSESSMENT",
-                        status=assessment.status,
-                        revision=assessment.observation_revision,
-                    )
-                    if assessment.status == "unsafe":
-                        interrupt_reason[:] = [assessment.reason]
-                        interrupt_event.set()
-                    pending = None
+                    except Exception as exc:  # noqa: BLE001 - caller converts B failure to unsafe
+                        error = exc
+                    result_queue.put((observation_for_analysis.revision, assessment, error))
 
-                with active_lock:
-                    active = active_ref[0]
-                current_key = (active.batch_id, current.screen_sha256) if active is not None else None
-                if pending is None and active is not None and current_key != last_key:
-                    pending = _ScreenAssessmentJob(self.screen_lobe, task, active, current)
-                    last_key = current_key
-                stop_event.wait(self.screen_poll_interval)
+            analysis_thread = Thread(target=analyze, name="compuse-screen-assessment", daemon=True)
+            analysis_thread.start()
+            pending = False
+            last_key: tuple[str, str] | None = None
+            try:
+                while not stop_event.is_set():
+                    current = self._observe()
+                    with state.lock:
+                        state.latest_observation = current
+                    self._trace("B", state="SCREEN_UPDATE", revision=current.revision)
+
+                    try:
+                        result_revision, assessment, error = result_queue.get_nowait()
+                    except Empty:
+                        pass
+                    else:
+                        pending = False
+                        if error is not None:
+                            assessment = ScreenAssessment(
+                                observation_revision=result_revision,
+                                status="unsafe",
+                                reason=f"screen assessment failed: {error}",
+                            )
+                        if assessment is None:
+                            assessment = ScreenAssessment(
+                                observation_revision=result_revision,
+                                status="unsafe",
+                                reason="screen assessment completed without a result",
+                            )
+                        with state.lock:
+                            state.latest_assessment = assessment
+                        self._trace(
+                            "B",
+                            state="SCREEN_ASSESSMENT",
+                            status=assessment.status,
+                            revision=assessment.observation_revision,
+                        )
+                        if assessment.status == "unsafe":
+                            interrupt_reason[:] = [assessment.reason]
+                            interrupt_event.set()
+
+                    with active_lock:
+                        active = active_ref[0]
+                    current_key = (active.batch_id, current.screen_sha256) if active is not None else None
+                    if not pending and active is not None and current_key != last_key:
+                        try:
+                            analysis_queue.put_nowait((active, current))
+                        except Full:
+                            pass
+                        else:
+                            pending = True
+                            last_key = current_key
+                    stop_event.wait(self.screen_poll_interval)
+            finally:
+                analysis_thread_stop.set()
+                try:
+                    analysis_queue.put_nowait(None)
+                except Full:
+                    pass
+                analysis_thread.join(timeout=0.1)
 
         watcher = Thread(target=watch, name="compuse-screen-watch", daemon=True)
         watcher.start()
