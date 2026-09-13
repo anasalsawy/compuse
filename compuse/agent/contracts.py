@@ -158,6 +158,28 @@ class BatchSpec(ContractModel):
         return self
 
 
+class ParallelBranchSpec(ContractModel):
+    """A bounded lane of work that can run independently of the other lane."""
+
+    branch_id: str = Field(min_length=1, max_length=128)
+    owner_lobe: Literal["A", "B"]
+    task: str = Field(min_length=1, max_length=4000)
+    batches: tuple[BatchSpec, ...] = Field(min_length=1, max_length=32)
+    exclusive_resources: tuple[str, ...] = Field(default=(), max_length=32)
+
+    @model_validator(mode="after")
+    def validate_chain(self) -> "ParallelBranchSpec":
+        first = self.batches[0]
+        if first.preconditions.source_batch_id is not None:
+            raise ValueError("the first parallel branch batch cannot depend on another batch")
+        for previous, current in zip(self.batches, self.batches[1:]):
+            if current.preconditions.source_batch_id != previous.batch_id:
+                raise ValueError("parallel branch batches must form a source_batch_id chain")
+        if any(batch.source_lobe.upper() != self.owner_lobe for batch in self.batches):
+            raise ValueError("parallel branch batch source_lobe must match owner_lobe")
+        return self
+
+
 class BCoreReview(ContractModel):
     """Always-on context broadening and anti-deception output from B."""
 
@@ -170,6 +192,37 @@ class BCoreReview(ContractModel):
     deception_grade: DeceptionGrade = DeceptionGrade.GREEN
     proof_required: tuple[str, ...] = Field(default=(), max_length=32)
     summary: str = Field(min_length=1, max_length=2000)
+
+
+class ParallelSplitPlan(ContractModel):
+    """A safe two-lane split followed by one verified merge batch."""
+
+    split_id: str = Field(min_length=1, max_length=128)
+    task: str = Field(min_length=1, max_length=4000)
+    branch_a: ParallelBranchSpec
+    branch_b: ParallelBranchSpec
+    merge_batch: BatchSpec
+    split_reason: str = Field(min_length=1, max_length=2000)
+    confidence: float = Field(ge=0.0, le=1.0)
+    core_review: BCoreReview
+
+    @model_validator(mode="after")
+    def validate_split(self) -> "ParallelSplitPlan":
+        if self.branch_a.branch_id == self.branch_b.branch_id:
+            raise ValueError("parallel branch ids must be distinct")
+        if self.branch_a.owner_lobe != "A" or self.branch_b.owner_lobe != "B":
+            raise ValueError("parallel branches must be owned by Loop A and Loop B")
+        coordinate_a = self.branch_a.batches[0].preconditions.coordinate_space_id
+        coordinate_b = self.branch_b.batches[0].preconditions.coordinate_space_id
+        if coordinate_a == coordinate_b:
+            raise ValueError("parallel branches must use distinct coordinate spaces")
+        resources_a = set(self.branch_a.exclusive_resources)
+        resources_b = set(self.branch_b.exclusive_resources)
+        if resources_a & resources_b:
+            raise ValueError("parallel branches declare an overlapping exclusive resource")
+        if self.merge_batch.preconditions.source_batch_id != self.split_id:
+            raise ValueError("merge batch must depend on the split id")
+        return self
 
 
 class LobeDecision(ContractModel):
@@ -220,5 +273,37 @@ class RuntimeReport(ContractModel):
     batches_executed: int = Field(ge=0)
     batches_discarded: int = Field(ge=0)
     actions_executed: int = Field(ge=0)
+    transcript: tuple[str, ...] = ()
+    final_observation: RuntimeObservation
+
+
+class ParallelBranchReport(ContractModel):
+    """Outcome of one independently executed branch."""
+
+    branch_id: str
+    status: str
+    batches_executed: int = Field(ge=0)
+    actions_executed: int = Field(ge=0)
+    uncertain: bool = False
+    elapsed_ms: float = Field(ge=0.0)
+    error: str | None = Field(default=None, max_length=2000)
+    final_observation: RuntimeObservation
+
+
+class ParallelRuntimeReport(ContractModel):
+    """Report for the split/parallel/merge architecture."""
+
+    run_id: str
+    status: str
+    split_id: str | None = None
+    batches_executed: int = Field(ge=0)
+    batches_discarded: int = Field(ge=0)
+    actions_executed: int = Field(ge=0)
+    parallel_elapsed_ms: float = Field(ge=0.0)
+    serial_estimate_ms: float = Field(ge=0.0)
+    branch_overlap_observed: bool = False
+    merge_verified: bool = False
+    branch_a: ParallelBranchReport | None = None
+    branch_b: ParallelBranchReport | None = None
     transcript: tuple[str, ...] = ()
     final_observation: RuntimeObservation

@@ -5,6 +5,8 @@ import threading
 import time
 from datetime import datetime, timezone
 
+import pytest
+
 from compuse.agent.contracts import (
     BCoreReview,
     BatchPreconditions,
@@ -12,12 +14,19 @@ from compuse.agent.contracts import (
     DeceptionGrade,
     LobeBProfile,
     LobeDecision,
+    ParallelSplitPlan,
     PredictedState,
     RuntimeObservation,
 )
-from compuse.agent.llm import DynamicModelLobeB
+from compuse.agent.llm import DynamicModelLobeB, ModelSplitPlanner
 from compuse.agent.runtime import DualLobeRuntime
-from compuse.app.dual_loop_demo import run_control_demo, run_demo, run_screen_aware_demo
+from compuse.app.dual_loop_demo import (
+    DemoSplitPlanner,
+    run_control_demo,
+    run_demo,
+    run_parallel_demo,
+    run_screen_aware_demo,
+)
 from compuse.protocol import Wait
 
 
@@ -261,3 +270,73 @@ def test_manual_b_profile_keeps_core_review_and_gatekeeper_is_hard_gate():
     )
     assert blocked.approved is False
     assert blocked.batch is None
+
+
+def test_parallel_split_runs_two_isolated_lanes_and_verified_merge():
+    report, adapter_a, adapter_b, merge_adapter, planner = run_parallel_demo(
+        profile="gatekeeper"
+    )
+
+    assert report.status == "completed"
+    assert report.branch_overlap_observed is True
+    assert report.merge_verified is True
+    assert report.parallel_elapsed_ms < report.serial_estimate_ms
+    assert report.actions_executed == 16
+    assert adapter_a.marker == "a-done"
+    assert adapter_b.marker == "b-done"
+    assert merge_adapter.marker == "done"
+    assert planner.calls == 1
+
+
+def test_parallel_split_control_runs_same_work_serially():
+    report, adapter_a, adapter_b, merge_adapter, _ = run_parallel_demo(parallel=False)
+
+    assert report.status == "completed"
+    assert report.branch_overlap_observed is False
+    assert report.merge_verified is True
+    assert report.parallel_elapsed_ms >= report.serial_estimate_ms * 0.95
+    assert adapter_a.marker == "a-done"
+    assert adapter_b.marker == "b-done"
+    assert merge_adapter.marker == "done"
+
+
+def test_parallel_split_contract_rejects_shared_exclusive_resource():
+    plan = DemoSplitPlanner().plan_split(
+        "split this task",
+        observation(1, ("home",)),
+        observation(2, ("home",)),
+    )
+    payload = plan.model_dump(mode="json")
+    payload["branch_b"]["exclusive_resources"] = ["workspace-a"]
+
+    with pytest.raises(ValueError):
+        ParallelSplitPlan.model_validate(payload, strict=False)
+
+
+def test_model_split_planner_parses_the_safe_split_contract():
+    source_plan = DemoSplitPlanner().plan_split(
+        "split this task",
+        observation(1, ("home",)),
+        observation(2, ("home",)),
+    )
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+
+        def complete_json(self, **kwargs):
+            self.calls.append(kwargs)
+            return source_plan.model_dump(mode="json")
+
+    client = FakeClient()
+    parsed = ModelSplitPlanner(client).plan_split(
+        "split this task",
+        observation(1, ("home",)),
+        observation(2, ("home",)),
+    )
+
+    assert parsed is not None
+    assert parsed.branch_a.owner_lobe == "A"
+    assert parsed.branch_b.owner_lobe == "B"
+    assert parsed.merge_batch.preconditions.source_batch_id == parsed.split_id
+    assert '"distinct_coordinate_spaces":true' in client.calls[0]["user_text"]

@@ -19,6 +19,7 @@ from .contracts import (
     DeceptionGrade,
     LobeBProfile,
     LobeDecision,
+    ParallelSplitPlan,
     RuntimeObservation,
     ScreenAssessment,
 )
@@ -149,6 +150,24 @@ _PROFILE_INSTRUCTIONS = {
 }
 
 
+_SPLIT_SYSTEM = """You are the task-split planner at the front door of Compuse.
+Return JSON only matching ParallelSplitPlan, or {"done": true} when the task
+cannot be safely split. Find one real breaking point where two pieces can run
+independently and later meet at one merge action. Loop A owns branch_a and
+Loop B owns branch_b. The two branches must use different coordinate spaces
+and non-overlapping exclusive_resources. Do not split work that touches the
+same window, file, browser profile, account, clipboard, or other shared state.
+Each branch must contain bounded typed BatchSpec objects whose first batch has
+source_batch_id=null and whose later batches chain from the prior batch. The
+merge_batch must have preconditions.source_batch_id equal to split_id and may
+run only after both branch final observations match their predicted_end
+anchors. Include the mandatory core_review: broaden context, identify missing
+prerequisites and failure modes, review claims for deception, and request the
+full artifact as proof for any artifact claim. GREEN means no deception
+detected, not guaranteed truth. If there is no safe independent split, refuse
+instead of forcing parallelism."""
+
+
 def _batch_prompt(
     task: str,
     observation: RuntimeObservation,
@@ -204,6 +223,28 @@ def _screen_prompt(
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
+def _split_prompt(
+    task: str,
+    observation_a: RuntimeObservation,
+    observation_b: RuntimeObservation,
+) -> str:
+    return json.dumps(
+        {
+            "task": task,
+            "observation_a": observation_a.model_dump(mode="json", exclude={"screenshot_data_url"}),
+            "observation_b": observation_b.model_dump(mode="json", exclude={"screenshot_data_url"}),
+            "required_safety": {
+                "distinct_coordinate_spaces": True,
+                "non_overlapping_exclusive_resources": True,
+                "verified_branch_endings_before_merge": True,
+                "merge_is_serial_after_both_lanes": True,
+            },
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
 class ModelLobeA:
     def __init__(self, client: OpenAICompatibleClient) -> None:
         self.client = client
@@ -225,6 +266,29 @@ class ModelLobeA:
         raw.pop("done", None)
         return BatchSpec.model_validate(raw, strict=False)
 
+
+class ModelSplitPlanner:
+    """Model-backed front-door planner for the isolated-lane prototype."""
+
+    def __init__(self, client: OpenAICompatibleClient) -> None:
+        self.client = client
+
+    def plan_split(
+        self,
+        task: str,
+        observation_a: RuntimeObservation,
+        observation_b: RuntimeObservation,
+    ) -> ParallelSplitPlan | None:
+        raw = self.client.complete_json(
+            system=_SPLIT_SYSTEM,
+            user_text=_split_prompt(task, observation_a, observation_b),
+            observation=observation_a,
+        )
+        if raw.get("done") is True or raw.get("parallelizable") is False:
+            return None
+        raw.pop("done", None)
+        raw.pop("parallelizable", None)
+        return ParallelSplitPlan.model_validate(raw, strict=False)
 
 class ModelLobeB:
     def __init__(
@@ -323,6 +387,7 @@ class DynamicModelLobeB(ModelScreenLobeB):
 __all__ = [
     "ModelError",
     "ModelLobeA",
+    "ModelSplitPlanner",
     "ModelLobeB",
     "ModelScreenLobeB",
     "DynamicModelLobeB",

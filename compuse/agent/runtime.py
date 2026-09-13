@@ -20,6 +20,10 @@ from .contracts import (
     DeceptionGrade,
     LobeBProfile,
     LobeDecision,
+    ParallelBranchReport,
+    ParallelBranchSpec,
+    ParallelRuntimeReport,
+    ParallelSplitPlan,
     RuntimeObservation,
     RuntimeReport,
     ScreenAssessment,
@@ -54,6 +58,17 @@ class LobeB(Protocol):
         active_batch: BatchSpec,
         observation: RuntimeObservation,
     ) -> LobeDecision: ...
+
+
+class ParallelTaskPlanner(Protocol):
+    """The task-receiving planner that decides whether a safe split exists."""
+
+    def plan_split(
+        self,
+        task: str,
+        observation_a: RuntimeObservation,
+        observation_b: RuntimeObservation,
+    ) -> ParallelSplitPlan | None: ...
 
 
 class ScreenAwareLobeB(Protocol):
@@ -133,8 +148,12 @@ class DualLobeRuntime:
         # Capture calls are serialized, while capture still overlaps planning
         # and physical input.  This protects adapters whose revision counter
         # is not internally thread-safe.
+        return self._observe_adapter(self.adapter)
+
+    def _observe_adapter(self, adapter: DesktopAdapter) -> RuntimeObservation:
+        """Capture an observation from a selected isolated desktop surface."""
         with self._observation_lock:
-            observation = self.adapter.observe()
+            observation = adapter.observe()
         # The adapter owns capture; the runtime owns the durable run identity.
         return observation.model_copy(update={"run_id": self.run_id})
 
@@ -203,13 +222,18 @@ class DualLobeRuntime:
         batch: BatchSpec,
         starting_observation: RuntimeObservation,
         *,
+        adapter: DesktopAdapter | None = None,
+        coordinator: Coordinator | None = None,
+        lane: str = "main",
         abort_event: Event | None = None,
         abort_reason: Callable[[], str] | None = None,
     ) -> BatchExecution:
         if not batch.preconditions.matches(starting_observation):
             raise StaleBatch(f"batch {batch.batch_id} preconditions do not match observation {starting_observation.revision}")
 
-        self._trace("EXEC", state="START", batch=batch.batch_id, actions=len(batch.actions))
+        dispatch_adapter = adapter or self.adapter
+        dispatch_coordinator = coordinator or self.coordinator
+        self._trace("EXEC", lane=lane, state="START", batch=batch.batch_id, actions=len(batch.actions))
 
         results: list[ActionExecution] = []
         uncertain = False
@@ -227,10 +251,10 @@ class DualLobeRuntime:
                 failure_index = index
                 uncertain = True
                 error = abort_reason() if abort_reason is not None else "screen watchdog interrupted execution"
-                self._trace("EXEC", state="INTERRUPTED", batch=batch.batch_id, index=f"{index + 1}/{len(batch.actions)}", reason=error)
+                self._trace("EXEC", lane=lane, state="INTERRUPTED", batch=batch.batch_id, index=f"{index + 1}/{len(batch.actions)}", reason=error)
                 break
             action_started = time.perf_counter()
-            self._trace("EXEC", state="ACTION_START", batch=batch.batch_id, index=f"{index + 1}/{len(batch.actions)}", kind=action.kind)
+            self._trace("EXEC", lane=lane, state="ACTION_START", batch=batch.batch_id, index=f"{index + 1}/{len(batch.actions)}", kind=action.kind)
             proposal = ActionProposal(
                 action_id=f"{batch.batch_id}-a{index}",
                 run_id=self.run_id,
@@ -238,7 +262,7 @@ class DualLobeRuntime:
                 origin=Origin.STRATEGIST_INSTRUCTION,
                 observation_revision=starting_observation.revision + index,
                 coordinate_space_id=starting_observation.coordinate_space_id,
-                policy_revision=self.coordinator.policy_revision,
+                policy_revision=dispatch_coordinator.policy_revision,
                 tool="desktop",
                 window_id=starting_observation.window_id,
                 process_id=starting_observation.process_id,
@@ -251,11 +275,13 @@ class DualLobeRuntime:
             protocol_observation = starting_observation.protocol_observation().model_copy(
                 update={"revision": starting_observation.revision + index}
             )
-            permit = self.coordinator.issue(proposal, protocol_observation, ttl=self.ttl)
+            permit = dispatch_coordinator.issue(proposal, protocol_observation, ttl=self.ttl)
+            consumed = False
             try:
-                approved = self.coordinator.consume(permit.permit_id, proposal, protocol_observation)
+                approved = dispatch_coordinator.consume(permit.permit_id, proposal, protocol_observation)
+                consumed = True
                 try:
-                    result = self.adapter.execute_action(approved)
+                    result = dispatch_adapter.execute_action(approved)
                     performed = bool(result.get("performed"))
                     action_uncertain = bool(result.get("uncertain", False))
                     detail = str(result.get("detail", ""))
@@ -275,6 +301,7 @@ class DualLobeRuntime:
                 results.append(action_result)
                 self._trace(
                     "EXEC",
+                    lane=lane,
                     state="ACTION_DONE" if performed else "ACTION_FAIL",
                     batch=batch.batch_id,
                     index=f"{index + 1}/{len(batch.actions)}",
@@ -296,9 +323,10 @@ class DualLobeRuntime:
                     "elapsed_ms": elapsed,
                 })
             finally:
-                self.coordinator.release(permit.permit_id)
+                if consumed:
+                    dispatch_coordinator.release(permit.permit_id)
 
-        actual = self._observe()
+        actual = self._observe_adapter(dispatch_adapter)
         ok = bool(results) and len(results) == len(batch.actions) and all(r.performed for r in results)
         if uncertain:
             ok = False
@@ -309,7 +337,7 @@ class DualLobeRuntime:
             "failure_index": failure_index,
             "actual_observation": actual.journal_view(),
         })
-        self._trace("EXEC", state="DONE" if ok else "INVALID", batch=batch.batch_id, verified=ok)
+        self._trace("EXEC", lane=lane, state="DONE" if ok else "INVALID", batch=batch.batch_id, verified=ok)
         return BatchExecution(
             batch_id=batch.batch_id,
             ok=ok,
@@ -607,6 +635,418 @@ class SingleLoopRuntime(DualLobeRuntime):
             actions_executed=actions_executed,
             transcript=tuple(transcript),
             final_observation=observation,
+        )
+
+
+class ParallelDualLobeRuntime(DualLobeRuntime):
+    """Prototype for safe task splitting across two independent desktop lanes.
+
+    The split planner is a short front-door decision made when the task
+    arrives.  If it finds two independent lanes, Loop A and Loop B execute
+    their bounded plans concurrently.  A merge batch is eligible only after
+    both final observations match their predicted end anchors.
+
+    This architecture requires isolated adapters (for example two windows,
+    workspaces, browser profiles, or machines).  It deliberately refuses a
+    plan whose lanes share a coordinate space or an exclusive resource.  Two
+    workers cannot safely control one ordinary desktop at the same time.
+    """
+
+    def __init__(
+        self,
+        *,
+        adapter_a: DesktopAdapter,
+        adapter_b: DesktopAdapter,
+        split_planner: ParallelTaskPlanner,
+        merge_adapter: DesktopAdapter | None = None,
+        parallel_execution: bool = True,
+        **kwargs: Any,
+    ) -> None:
+        if adapter_a is adapter_b:
+            raise ValueError("parallel lanes require two distinct desktop adapters")
+        self.adapter_a = adapter_a
+        self.adapter_b = adapter_b
+        self.merge_adapter = merge_adapter or adapter_a
+        self.split_planner = split_planner
+        self.parallel_execution = parallel_execution
+        # The inherited coordinator is used for the shared merge surface. Each
+        # independent lane receives its own coordinator below, otherwise the
+        # single-desktop mutation lock would intentionally serialize both lanes.
+        super().__init__(
+            adapter=self.merge_adapter,
+            lobe_a=split_planner,  # the base planner slot is unused by this loop
+            lobe_b=None,
+            **kwargs,
+        )
+
+    @staticmethod
+    def _predicted_end_matches(
+        predicted: Any,
+        observation: RuntimeObservation,
+    ) -> bool:
+        if observation.coordinate_space_id != predicted.coordinate_space_id:
+            return False
+        if predicted.foreground_window is not None and observation.foreground_window != predicted.foreground_window:
+            return False
+        if predicted.browser_url is not None and observation.browser_url != predicted.browser_url:
+            return False
+        return set(predicted.required_markers).issubset(set(observation.visible_markers))
+
+    def _run_parallel_branch(
+        self,
+        branch: ParallelBranchSpec,
+        adapter: DesktopAdapter,
+        coordinator: Coordinator,
+        starting_observation: RuntimeObservation,
+        *,
+        started_lanes: set[str],
+        completed_lanes: set[str],
+        overlap_event: Event,
+        lane_state_lock: Lock,
+        transcript: list[str],
+        transcript_lock: Lock,
+    ) -> ParallelBranchReport:
+        started_at = time.perf_counter()
+        observation = starting_observation
+        actions_executed = 0
+        batches_executed = 0
+        uncertain = False
+        error: str | None = None
+        status = "completed"
+
+        with lane_state_lock:
+            started_lanes.add(branch.branch_id)
+            if len(started_lanes) == 2 and not completed_lanes:
+                overlap_event.set()
+        self._trace(
+            "LOOP",
+            state="BRANCH_START",
+            lane=branch.branch_id,
+            owner=branch.owner_lobe,
+            task=branch.task,
+        )
+        self._append(
+            "parallel_branch_started",
+            {
+                "split_id": self.run_id,
+                "branch_id": branch.branch_id,
+                "owner_lobe": branch.owner_lobe,
+                "observation": starting_observation.journal_view(),
+            },
+        )
+
+        try:
+            for batch in branch.batches:
+                if not batch.preconditions.matches(observation):
+                    status = "stale_before_execution"
+                    error = f"{batch.batch_id} preconditions do not match branch observation"
+                    break
+                with transcript_lock:
+                    transcript.append(f"execute {branch.branch_id}/{batch.batch_id}: {len(batch.actions)} action(s)")
+                execution = self._execute_batch(
+                    batch,
+                    observation,
+                    adapter=adapter,
+                    coordinator=coordinator,
+                    lane=branch.branch_id,
+                )
+                batches_executed += 1
+                actions_executed += len(execution.results)
+                observation = execution.actual_observation
+                if not execution.ok or execution.uncertain:
+                    status = "execution_failed"
+                    uncertain = execution.uncertain
+                    error = execution.error or "branch execution was not verified"
+                    break
+
+            if status == "completed":
+                final_prediction = branch.batches[-1].predicted_end
+                if not self._predicted_end_matches(final_prediction, observation):
+                    status = "end_anchor_mismatch"
+                    error = "branch final observation did not match its predicted end anchor"
+        except Exception as exc:  # noqa: BLE001 - one lane must fail closed
+            status = "branch_error"
+            uncertain = True
+            error = str(exc)
+        finally:
+            with lane_state_lock:
+                completed_lanes.add(branch.branch_id)
+
+        elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+        with transcript_lock:
+            transcript.append(
+                f"branch {branch.branch_id} {status}: {actions_executed} action(s) in {elapsed_ms:.1f}ms"
+            )
+        self._append(
+            "parallel_branch_finished",
+            {
+                "branch_id": branch.branch_id,
+                "status": status,
+                "batches_executed": batches_executed,
+                "actions_executed": actions_executed,
+                "uncertain": uncertain,
+                "error": error,
+                "final_observation": observation.journal_view(),
+            },
+        )
+        self._trace(
+            "LOOP",
+            state="BRANCH_DONE" if status == "completed" else "BRANCH_INVALID",
+            lane=branch.branch_id,
+            actions=actions_executed,
+            elapsed_ms=f"{elapsed_ms:.1f}",
+        )
+        return ParallelBranchReport(
+            branch_id=branch.branch_id,
+            status=status,
+            batches_executed=batches_executed,
+            actions_executed=actions_executed,
+            uncertain=uncertain,
+            elapsed_ms=elapsed_ms,
+            error=error,
+            final_observation=observation,
+        )
+
+    def run(self, task: str, *, max_batches: int = 32) -> ParallelRuntimeReport:
+        if not task.strip():
+            raise ValueError("task must not be empty")
+        if max_batches < 1:
+            raise ValueError("max_batches must be positive")
+
+        started_at = time.perf_counter()
+        transcript: list[str] = []
+        transcript_lock = Lock()
+        initial_a = self._observe_adapter(self.adapter_a)
+        initial_b = self._observe_adapter(self.adapter_b)
+        merge_observation = self._observe_adapter(self.merge_adapter)
+        self._trace("RUN", state="START", architecture="parallel", run_id=self.run_id, task=task)
+        self._append(
+            "run_started",
+            {
+                "task": task,
+                "architecture": "parallel",
+                "observations": {
+                    "A": initial_a.journal_view(),
+                    "B": initial_b.journal_view(),
+                    "merge": merge_observation.journal_view(),
+                },
+            },
+        )
+
+        self._trace("SPLIT", state="PLAN_START")
+        try:
+            plan = self.split_planner.plan_split(task, initial_a, initial_b)
+        except Exception as exc:  # noqa: BLE001 - split failure is safe refusal
+            plan = None
+            transcript.append(f"split planner failed: {exc}")
+        self._trace("SPLIT", state="PLAN_DONE", split=plan.split_id if plan else "none")
+
+        if plan is None:
+            self._append("parallel_split_rejected", {"reason": "no safe split was produced"})
+            self._append("run_finished", {"status": "not_parallelizable"})
+            return ParallelRuntimeReport(
+                run_id=self.run_id,
+                status="not_parallelizable",
+                batches_executed=0,
+                batches_discarded=0,
+                actions_executed=0,
+                parallel_elapsed_ms=(time.perf_counter() - started_at) * 1000.0,
+                serial_estimate_ms=0.0,
+                transcript=tuple(transcript),
+                final_observation=merge_observation,
+            )
+
+        self._record_core_review(plan.split_id, plan.core_review)
+        if plan.core_review.profile == LobeBProfile.GATEKEEPER and (
+            plan.core_review.deception_grade != DeceptionGrade.GREEN
+            or plan.core_review.proof_required
+        ):
+            reason = "split gatekeeper rejected: proof or non-GREEN review remains"
+            transcript.append(reason)
+            self._append("parallel_split_rejected", {"split_id": plan.split_id, "reason": reason})
+            self._append("run_finished", {"status": "not_parallelizable", "split_id": plan.split_id})
+            return ParallelRuntimeReport(
+                run_id=self.run_id,
+                status="not_parallelizable",
+                split_id=plan.split_id,
+                batches_executed=0,
+                batches_discarded=1,
+                actions_executed=0,
+                parallel_elapsed_ms=(time.perf_counter() - started_at) * 1000.0,
+                serial_estimate_ms=0.0,
+                transcript=tuple(transcript),
+                final_observation=merge_observation,
+            )
+
+        if not plan.branch_a.batches[0].preconditions.matches(initial_a):
+            reason = "Loop A branch start does not match its fresh observation"
+        elif not plan.branch_b.batches[0].preconditions.matches(initial_b):
+            reason = "Loop B branch start does not match its fresh observation"
+        elif not plan.merge_batch.preconditions.matches(merge_observation):
+            reason = "merge preconditions do not match the shared merge surface"
+        else:
+            reason = ""
+        if reason:
+            transcript.append(f"split rejected: {reason}")
+            self._append("parallel_split_rejected", {"split_id": plan.split_id, "reason": reason})
+            self._append("run_finished", {"status": "not_parallelizable", "split_id": plan.split_id})
+            return ParallelRuntimeReport(
+                run_id=self.run_id,
+                status="not_parallelizable",
+                split_id=plan.split_id,
+                batches_executed=0,
+                batches_discarded=1,
+                actions_executed=0,
+                parallel_elapsed_ms=(time.perf_counter() - started_at) * 1000.0,
+                serial_estimate_ms=0.0,
+                transcript=tuple(transcript),
+                final_observation=merge_observation,
+            )
+
+        started_lanes: set[str] = set()
+        completed_lanes: set[str] = set()
+        lane_state_lock = Lock()
+        overlap_event = Event()
+        lane_a_coordinator = Coordinator(store=self.store, policy_revision=self.coordinator.policy_revision)
+        lane_b_coordinator = Coordinator(store=self.store, policy_revision=self.coordinator.policy_revision)
+        branch_a: ParallelBranchReport
+        branch_b: ParallelBranchReport
+
+        self._trace("SPLIT", state="EXECUTE", split=plan.split_id, branches="A+B")
+        branch_kwargs = {
+            "started_lanes": started_lanes,
+            "completed_lanes": completed_lanes,
+            "overlap_event": overlap_event,
+            "lane_state_lock": lane_state_lock,
+            "transcript": transcript,
+            "transcript_lock": transcript_lock,
+        }
+        if self.parallel_execution:
+            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="compuse-parallel") as pool:
+                future_a = pool.submit(
+                    self._run_parallel_branch,
+                    plan.branch_a,
+                    self.adapter_a,
+                    lane_a_coordinator,
+                    initial_a,
+                    **branch_kwargs,
+                )
+                future_b = pool.submit(
+                    self._run_parallel_branch,
+                    plan.branch_b,
+                    self.adapter_b,
+                    lane_b_coordinator,
+                    initial_b,
+                    **branch_kwargs,
+                )
+                branch_a = future_a.result()
+                branch_b = future_b.result()
+        else:
+            branch_a = self._run_parallel_branch(
+                plan.branch_a,
+                self.adapter_a,
+                lane_a_coordinator,
+                initial_a,
+                **branch_kwargs,
+            )
+            branch_b = self._run_parallel_branch(
+                plan.branch_b,
+                self.adapter_b,
+                lane_b_coordinator,
+                initial_b,
+                **branch_kwargs,
+            )
+
+        serial_estimate = branch_a.elapsed_ms + branch_b.elapsed_ms
+        merge_verified = False
+        merge_execution: BatchExecution | None = None
+        if branch_a.status == "completed" and branch_b.status == "completed":
+            # The join gate runs after both lanes are complete. Only now may a
+            # shared adapter be touched, even when it is the lane-A adapter.
+            merge_observation = self._observe_adapter(self.merge_adapter)
+            join_ok = plan.merge_batch.preconditions.matches(merge_observation)
+            join_ok = join_ok and self._predicted_end_matches(
+                plan.merge_batch.preconditions, merge_observation
+            )
+            self._trace("MERGE", state="GATE", split=plan.split_id, ready=join_ok)
+            if join_ok:
+                with transcript_lock:
+                    transcript.append(f"merge {plan.merge_batch.batch_id}: {len(plan.merge_batch.actions)} action(s)")
+                merge_execution = self._execute_batch(
+                    plan.merge_batch,
+                    merge_observation,
+                    adapter=self.merge_adapter,
+                    coordinator=self.coordinator,
+                    lane="MERGE",
+                )
+                merge_observation = merge_execution.actual_observation
+                merge_verified = (
+                    merge_execution.ok
+                    and not merge_execution.uncertain
+                    and self._predicted_end_matches(plan.merge_batch.predicted_end, merge_observation)
+                )
+                self._trace("MERGE", state="DONE" if merge_verified else "INVALID", verified=merge_verified)
+            else:
+                transcript.append("merge blocked: shared join surface was not ready")
+        else:
+            transcript.append("merge blocked: one or both branch endings were not verified")
+
+        merge_elapsed = sum(result.elapsed_ms for result in merge_execution.results) if merge_execution else 0.0
+        serial_estimate += merge_elapsed
+        actions_executed = branch_a.actions_executed + branch_b.actions_executed + (
+            len(merge_execution.results) if merge_execution else 0
+        )
+        batches_executed = branch_a.batches_executed + branch_b.batches_executed + (
+            1 if merge_execution is not None else 0
+        )
+        status = "completed" if merge_verified else (
+            "branches_failed" if branch_a.status != "completed" or branch_b.status != "completed" else "merge_failed"
+        )
+        parallel_elapsed = (time.perf_counter() - started_at) * 1000.0
+        self._append(
+            "parallel_join_finished",
+            {
+                "split_id": plan.split_id,
+                "status": status,
+                "branch_overlap_observed": overlap_event.is_set(),
+                "merge_verified": merge_verified,
+                "serial_estimate_ms": serial_estimate,
+                "parallel_elapsed_ms": parallel_elapsed,
+            },
+        )
+        self._append(
+            "run_finished",
+            {
+                "status": status,
+                "split_id": plan.split_id,
+                "batches_executed": batches_executed,
+                "batches_discarded": 0 if status == "completed" else 1,
+                "actions_executed": actions_executed,
+            },
+        )
+        self._trace(
+            "RUN",
+            state=status.upper(),
+            split=plan.split_id,
+            actions=actions_executed,
+            parallel_ms=f"{parallel_elapsed:.1f}",
+            serial_estimate_ms=f"{serial_estimate:.1f}",
+        )
+        return ParallelRuntimeReport(
+            run_id=self.run_id,
+            status=status,
+            split_id=plan.split_id,
+            batches_executed=batches_executed,
+            batches_discarded=0 if status == "completed" else 1,
+            actions_executed=actions_executed,
+            parallel_elapsed_ms=parallel_elapsed,
+            serial_estimate_ms=serial_estimate,
+            branch_overlap_observed=overlap_event.is_set(),
+            merge_verified=merge_verified,
+            branch_a=branch_a,
+            branch_b=branch_b,
+            transcript=tuple(transcript),
+            final_observation=merge_observation,
         )
 
 
@@ -923,6 +1363,8 @@ __all__ = [
     "DualLobeRuntime",
     "LobeA",
     "LobeB",
+    "ParallelDualLobeRuntime",
+    "ParallelTaskPlanner",
     "ScreenAwareDualLobeRuntime",
     "ScreenAwareLobeB",
     "SingleLoopRuntime",

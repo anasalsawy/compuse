@@ -86,6 +86,39 @@ independent observer and safety gate. It may interrupt before the next physical
 action when the screen becomes unsafe, and it may reject A's predicted batch
 when the fresh screen does not support it.
 
+## Parallel split prototype
+
+The split prototype explores a different use of the two loops. The task
+arrives at a front-door planner that searches for a safe breaking point. It
+returns two bounded `ParallelBranchSpec` plans and one `merge_batch`:
+
+```mermaid
+flowchart TD
+    T[Task arrives] --> S[Split planner finds safe boundary]
+    S --> A[Loop A isolated branch]
+    S --> B[Loop B isolated branch]
+    A --> GA[A final observation matches]
+    B --> GB[B final observation matches]
+    GA --> J[Join gate]
+    GB --> J
+    J -->|both verified| M[Serial merge batch]
+    J -->|missing proof| R[Refuse split or recover]
+```
+
+The runtime refuses a split when the branches share a coordinate space or an
+exclusive resource. A resource can be a window, file, browser profile,
+account, clipboard, or any other state that makes simultaneous input unsafe.
+The merge surface is touched only after both branch endings are verified. The
+parallel loop therefore has a chance to reduce elapsed time, but it cannot
+claim a successful task merely because both workers returned.
+
+`ParallelDualLobeRuntime` also has a serial mode used as a same-work control
+group. The deterministic shell proof reports branch overlap, merge
+verification, parallel elapsed time, and a serial estimate. The
+model-backed `ModelSplitPlanner` produces the same strict contract, but live
+parallel input still needs two genuinely isolated desktop adapters; creating
+two adapter objects for one physical desktop is not sufficient.
+
 ## The predictive pipeline
 
 ```mermaid

@@ -1,6 +1,6 @@
-# Tasker
+# Compuse
 
-Tasker is a local-first desktop computer-use runtime with an explicit
+Compuse is a local-first desktop computer-use runtime with an explicit
 authorization and audit boundary. It now includes a first NeuralAgent-style
 Windows vertical slice: headed screen observation, typed physical input, an
 OpenAI-compatible vision planner, and a dual-lobe speculative handoff loop.
@@ -48,16 +48,16 @@ are injected internally into later planning without changing the user's task.
 ```powershell
 cd C:\Projects
 git clone --branch feat/neuralagent-dual-lobe --single-branch `
-  https://github.com/anasalsawy/Tasker.git Tasker
-cd Tasker
+  https://github.com/anasalsawy/compuse.git compuse
+cd compuse
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -e ".[desktop,test]"
-$env:Tasker_LLM_BASE_URL = "https://api.example.com/v1"
-$env:Tasker_LLM_API_KEY = "your-key"
-$env:Tasker_LLM_MODEL = "your-vision-model"
-Tasker-agent "Open Chrome and navigate to example.com" `
+$env:COMPUSE_LLM_BASE_URL = "https://api.example.com/v1"
+$env:COMPUSE_LLM_API_KEY = "your-key"
+$env:COMPUSE_LLM_MODEL = "your-vision-model"
+compuse-agent "Open Chrome and navigate to example.com" `
   --architecture predictive --lobe-b-profile base --live --trace
 ```
 
@@ -74,7 +74,7 @@ Run the deterministic comparison first. It uses the real runtime classes on
 the same multi-stage task, prints timestamps, and performs no desktop input:
 
 ```powershell
-Tasker-dual-loop-demo --scenario complex --architecture compare `
+compuse-dual-loop-demo --scenario complex --architecture compare `
   --lobe-b-profile gatekeeper
 ```
 
@@ -93,14 +93,42 @@ Run one deterministic proof alone with `--architecture control`,
 `CONTROL_BASELINE=PASS`; each dual-lobe proof ends in
 `CONTINUOUS_HANDOFF=PASS`; the three-way comparison ends in `COMPARISON=PASS`.
 
+### Parallel split prototype
+
+The prototype also tests a different dual-loop architecture. A front-door
+split planner looks for one safe breaking point. If it finds independent
+surfaces and non-overlapping resources, Loop A and Loop B execute their own
+bounded branch plans concurrently. A verified join gate then runs one merge
+batch after both final observations match their predicted end anchors.
+
+This is not blind parallel clicking: the runtime refuses a split when both
+lanes use the same coordinate space or declare the same exclusive resource.
+The lanes must be isolated windows, workspaces, browser profiles, or machines;
+one ordinary desktop cannot safely accept two simultaneous physical input
+streams. The shell proof is deterministic and does not touch the real desktop.
+
+Run the split prototype and its same-work control group:
+
+```powershell
+compuse-dual-loop-demo --architecture parallel --lobe-b-profile gatekeeper
+compuse-dual-loop-demo --architecture parallel-control --lobe-b-profile gatekeeper
+```
+
+Use `--architecture compare` to include both split designs alongside the
+original control, predictive, and screen-aware comparisons. A successful
+parallel proof ends in `PARALLEL_SPLIT=PASS`, while the serial split baseline
+ends in `SPLIT_CONTROL_BASELINE=PASS`. The model-backed `ModelSplitPlanner`
+uses the same strict `ParallelSplitPlan` contract; live two-surface adapters
+are still required before enabling physical parallel input.
+
 For the live agent, use `--architecture predictive` or
 `--architecture screen-aware`, add `--trace`, and select the B profile
 explicitly:
 
 ```powershell
-Tasker-agent "Open Chrome and navigate to example.com" `
+compuse-agent "Open Chrome and navigate to example.com" `
   --architecture predictive --lobe-b-profile base --live --trace
-Tasker-agent "Open Chrome and navigate to example.com" `
+compuse-agent "Open Chrome and navigate to example.com" `
   --architecture screen-aware --lobe-b-profile screen-aware --live --trace
 ```
 
@@ -112,7 +140,7 @@ For the screen-aware loop, choose the screen-aware architecture and select the
 profile manually:
 
 ```powershell
-Tasker-agent "Open Chrome and navigate to example.com" `
+compuse-agent "Open Chrome and navigate to example.com" `
   --architecture screen-aware --lobe-b-profile screen-aware --live --trace
 ```
 
