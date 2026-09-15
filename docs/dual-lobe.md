@@ -13,7 +13,7 @@ $env:COMPUSE_LLM_BASE_URL = "https://api.example.com/v1"
 $env:COMPUSE_LLM_API_KEY = "your-key"
 $env:COMPUSE_LLM_MODEL = "your-vision-model"
 python -m pip install -e ".[desktop]"
-compuse-agent "Open Chrome and navigate to example.com" --live
+tasker-agent "Open Chrome and navigate to example.com" --live
 ```
 
 `--live` is an explicit capability switch. Without it, the adapter can observe

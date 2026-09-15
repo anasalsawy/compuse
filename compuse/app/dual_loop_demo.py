@@ -654,7 +654,7 @@ def _print_parallel_proof(label: str, report, adapter_a, adapter_b, merge_adapte
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="compuse-dual-loop-demo",
+        prog="tasker-demo",
         description="Compare control, predictive, screen-aware, and parallel-split dual-lobe execution.",
     )
     parser.add_argument(

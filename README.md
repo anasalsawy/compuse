@@ -1,9 +1,44 @@
-# Compuse
+# Tasker
 
-Compuse is a local-first desktop computer-use runtime with an explicit
+Tasker is a local-first desktop computer-use runtime with an explicit
 authorization and audit boundary. It now includes a first NeuralAgent-style
 Windows vertical slice: headed screen observation, typed physical input, an
 OpenAI-compatible vision planner, and a dual-lobe speculative handoff loop.
+
+## Start the interactive app
+
+Tasker is a persistent command shell, not only a one-shot command. Start it
+once, then enter natural-language tasks at the `tasker>` prompt:
+
+```powershell
+tasker
+```
+
+Inside the shell:
+
+```text
+tasker[screen-aware/gatekeeper]> Open Chrome and navigate to https://example.com
+tasker[screen-aware/gatekeeper]> Find the page title
+tasker[screen-aware/gatekeeper]> /profile recovery
+tasker[screen-aware/recovery]> /architecture predictive
+tasker[predictive/recovery]> /status
+tasker[predictive/recovery]> /exit
+```
+
+In a normal terminal, typing `/` opens the slash-command completion menu while
+you type. Press Tab or Enter to select a command. Typing `/` and pressing
+Enter also prints the command menu as a fallback.
+
+The model client and desktop adapter remain loaded across tasks. Each task
+gets a separate run ID and its own hash-chained journal entries in the same
+SQLite journal. A failed task is reported and the shell stays open. The
+operator can manually change the architecture, B profile, and trace setting;
+the profile never changes autonomously. Use `/help` to see every shell
+command. API keys are never printed by `/config`.
+
+The user-facing command is `tasker`. `tasker-agent` remains available for
+scripts that intentionally run exactly one task and then exit, while
+`tasker-demo` runs the deterministic shell proof.
 
 ## Dual-lobe runtime
 
@@ -47,17 +82,15 @@ are injected internally into later planning without changing the user's task.
 
 ```powershell
 cd C:\Projects
-git clone --branch feat/neuralagent-dual-lobe --single-branch `
-  https://github.com/anasalsawy/compuse.git compuse
-cd compuse
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -e ".[desktop,test]"
+git clone --branch main --single-branch `
+  https://github.com/anasalsawy/compuse.git tasker
+cd tasker
+python -m pip --isolated install --user -e ".[desktop,test]"
 $env:COMPUSE_LLM_BASE_URL = "https://api.example.com/v1"
 $env:COMPUSE_LLM_API_KEY = "your-key"
 $env:COMPUSE_LLM_MODEL = "your-vision-model"
-compuse-agent "Open Chrome and navigate to example.com" `
+tasker
+tasker-agent "Open Chrome and navigate to example.com" `
   --architecture predictive --lobe-b-profile base --live --trace
 ```
 
@@ -74,7 +107,7 @@ Run the deterministic comparison first. It uses the real runtime classes on
 the same multi-stage task, prints timestamps, and performs no desktop input:
 
 ```powershell
-compuse-dual-loop-demo --scenario complex --architecture compare `
+tasker-demo --scenario complex --architecture compare `
   --lobe-b-profile gatekeeper
 ```
 
@@ -110,8 +143,8 @@ streams. The shell proof is deterministic and does not touch the real desktop.
 Run the split prototype and its same-work control group:
 
 ```powershell
-compuse-dual-loop-demo --architecture parallel --lobe-b-profile gatekeeper
-compuse-dual-loop-demo --architecture parallel-control --lobe-b-profile gatekeeper
+tasker-demo --architecture parallel --lobe-b-profile gatekeeper
+tasker-demo --architecture parallel-control --lobe-b-profile gatekeeper
 ```
 
 Use `--architecture compare` to include both split designs alongside the
@@ -126,9 +159,9 @@ For the live agent, use `--architecture predictive` or
 explicitly:
 
 ```powershell
-compuse-agent "Open Chrome and navigate to example.com" `
+tasker-agent "Open Chrome and navigate to example.com" `
   --architecture predictive --lobe-b-profile base --live --trace
-compuse-agent "Open Chrome and navigate to example.com" `
+tasker-agent "Open Chrome and navigate to example.com" `
   --architecture screen-aware --lobe-b-profile screen-aware --live --trace
 ```
 
@@ -140,7 +173,7 @@ For the screen-aware loop, choose the screen-aware architecture and select the
 profile manually:
 
 ```powershell
-compuse-agent "Open Chrome and navigate to example.com" `
+tasker-agent "Open Chrome and navigate to example.com" `
   --architecture screen-aware --lobe-b-profile screen-aware --live --trace
 ```
 
@@ -160,7 +193,7 @@ The original coordination core remains available and provides:
 - fail-closed lifecycle transition tables.
 
 ```powershell
-python -m pip install -e ".[test]"
+python -m pip --isolated install --user -e ".[test]"
 python -m pytest -ra
 ```
 

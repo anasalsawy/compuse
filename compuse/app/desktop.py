@@ -64,7 +64,7 @@ class DesktopAdapter:
                 import pyautogui
             except ImportError as exc:  # pragma: no cover - optional Windows dependency
                 raise DesktopSafetyError(
-                    "pyautogui is not installed; install compuse[desktop]"
+                    "pyautogui is not installed; install tasker[desktop]"
                 ) from exc
             pyautogui.PAUSE = 0.02
             self._pyautogui = pyautogui

@@ -13,6 +13,8 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from pydantic import ValidationError
+
 from .contracts import (
     BCoreReview,
     BatchSpec,
@@ -97,17 +99,26 @@ class OpenAICompatibleClient:
 
 
 _A_SYSTEM = """You are Lobe A, the active computer-use planner in Compuse.
-Return JSON only, matching the BatchSpec schema. Plan at most 8 typed actions.
+Return JSON only, matching the exact BatchSpec schema supplied in the user
+message. Do not use a generic computer-use action format. The top-level object
+must contain batch_id, actions, preconditions, predicted_end, confidence,
+risk, barrier_after, terminal, and source_lobe. Every action must use the
+exact discriminator field `kind`; never use `action_type`, `button`, `clicks`,
+or `modifiers`. Plan at most 8 typed actions.
 You see the current desktop observation and must keep a short, executable
 batch; stop before a modal, navigation, submit, login, payment, or other state
 transition whose result cannot be predicted. The predicted_end must describe
 where the desktop will be after every action and include at least one checkable
 anchor: an exact foreground_window, exact browser_url, or required_markers.
 source_lobe must be \"A\". Do not invent that an action succeeded; the runtime
-will observe the real desktop after dispatch."""
+will observe the real desktop after dispatch. Do not omit required metadata or
+add fields not present in the supplied schema."""
 
 _B_SYSTEM = """You are Lobe B, Compuse's live shadow lobe and handoff gate.
-Return JSON only with approved, batch, reason, corrections, and core_review.
+Return JSON only matching the exact LobeDecision schema supplied in the user
+message. If a batch is present, it must be a complete BatchSpec. Every action
+inside it must use `kind` as the discriminator; never use `action_type`,
+`button`, `clicks`, or `modifiers`.
 You receive Lobe A's exact current action batch and its predicted end state.
 Independently prepare the next bounded typed-action batch starting from that
 predicted end. The next batch's preconditions.source_batch_id must equal the
@@ -138,7 +149,26 @@ batch against the freshly observed screen and B's assessment. Approve only if
 the screen is stable, the candidate's source_batch_id is exact, and its
 preconditions are grounded in the observation. If approved, return the exact
 candidate batch unchanged. Reject uncertainty or any mismatch. Include the
-mandatory core_review described by the B profile instructions."""
+mandatory core_review described by the B profile instructions. If a batch is
+returned, use the complete BatchSpec schema supplied in the user message and
+use `kind` for every action discriminator."""
+
+
+_BATCH_SCHEMA_RULES = """
+Wire-format rules for every BatchSpec:
+- The top-level object is complete: batch_id, actions, preconditions,
+  predicted_end, confidence, risk, barrier_after, terminal, source_lobe.
+- `actions` is a non-empty array. Each item is discriminated by `kind`.
+- Use only fields from the supplied schema. For example, a click is
+  {"kind":"click","x":123,"y":456}; a launch is
+  {"kind":"application.launch","target_id":"..."}; a browse action is
+  {"kind":"browse","url":"https://..."}.
+- Never emit `action_type`, `button`, `clicks`, `modifiers`, or another
+  framework's computer-use action format.
+- `preconditions` and `predicted_end` must use the exact coordinate space and
+  a checkable anchor from the observation. Initial A batches use
+  source_batch_id=null; later batches name the exact source batch.
+"""
 
 
 _PROFILE_INSTRUCTIONS = {
@@ -174,6 +204,7 @@ def _batch_prompt(
     active: BatchSpec | None = None,
     *,
     profile: LobeBProfile | None = None,
+    output_schema: dict[str, Any] | None = None,
 ) -> str:
     payload: dict[str, Any] = {
         "task": task,
@@ -181,6 +212,8 @@ def _batch_prompt(
     }
     if active is not None:
         payload["active_batch"] = active.model_dump(mode="json")
+    if output_schema is not None:
+        payload["output_schema"] = output_schema
     if profile is not None:
         payload["manual_b_profile"] = profile.value
         payload["profile_instruction"] = _PROFILE_INSTRUCTIONS[profile]
@@ -201,6 +234,7 @@ def _screen_prompt(
     candidate: BatchSpec | None = None,
     assessment: ScreenAssessment | None = None,
     profile: LobeBProfile | None = None,
+    output_schema: dict[str, Any] | None = None,
 ) -> str:
     payload: dict[str, Any] = {
         "task": task,
@@ -211,6 +245,8 @@ def _screen_prompt(
         payload["candidate_next_batch"] = candidate.model_dump(mode="json")
     if assessment is not None:
         payload["screen_assessment"] = assessment.model_dump(mode="json")
+    if output_schema is not None:
+        payload["output_schema"] = output_schema
     if profile is not None:
         payload["manual_b_profile"] = profile.value
         payload["profile_instruction"] = _PROFILE_INSTRUCTIONS[profile]
@@ -227,22 +263,72 @@ def _split_prompt(
     task: str,
     observation_a: RuntimeObservation,
     observation_b: RuntimeObservation,
+    *,
+    output_schema: dict[str, Any] | None = None,
 ) -> str:
-    return json.dumps(
-        {
-            "task": task,
-            "observation_a": observation_a.model_dump(mode="json", exclude={"screenshot_data_url"}),
-            "observation_b": observation_b.model_dump(mode="json", exclude={"screenshot_data_url"}),
-            "required_safety": {
-                "distinct_coordinate_spaces": True,
-                "non_overlapping_exclusive_resources": True,
-                "verified_branch_endings_before_merge": True,
-                "merge_is_serial_after_both_lanes": True,
-            },
+    payload: dict[str, Any] = {
+        "task": task,
+        "observation_a": observation_a.model_dump(mode="json", exclude={"screenshot_data_url"}),
+        "observation_b": observation_b.model_dump(mode="json", exclude={"screenshot_data_url"}),
+        "required_safety": {
+            "distinct_coordinate_spaces": True,
+            "non_overlapping_exclusive_resources": True,
+            "verified_branch_endings_before_merge": True,
+            "merge_is_serial_after_both_lanes": True,
         },
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
+    }
+    if output_schema is not None:
+        payload["output_schema"] = output_schema
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _validate_batch_or_repair(
+    client: OpenAICompatibleClient,
+    raw: dict[str, Any],
+    *,
+    task: str,
+    observation: RuntimeObservation,
+    active: BatchSpec | None,
+    source_lobe: str,
+) -> BatchSpec | None:
+    """Validate a batch and make one bounded schema-repair request if needed.
+
+    Vision models sometimes return a valid JSON object using a different
+    computer-use vocabulary (for example ``action_type`` instead of the
+    protocol's discriminated ``kind`` field).  We do not silently coerce that
+    object or invent missing safety metadata.  Instead, the model gets one
+    repair attempt with the actual Pydantic schema and validation error.  If
+    repair fails, the original strict validation error is allowed to surface.
+    """
+    candidate = dict(raw)
+    candidate.pop("done", None)
+    try:
+        return BatchSpec.model_validate(candidate, strict=False)
+    except ValidationError as first_error:
+        repair_payload: dict[str, Any] = {
+            "task": task,
+            "observation": observation.model_dump(mode="json", exclude={"screenshot_data_url"}),
+            "invalid_response": raw,
+            "validation_error": str(first_error),
+            "required_source_lobe": source_lobe,
+            "output_schema": BatchSpec.model_json_schema(),
+        }
+        if active is not None:
+            repair_payload["active_batch"] = active.model_dump(mode="json")
+        repaired = client.complete_json(
+            system=(
+                "Repair the invalid response into one complete BatchSpec JSON "
+                "object. Return JSON only. Preserve the task and observation; "
+                "do not invent action success. Use `kind` for every action, "
+                "never `action_type`. Do not omit preconditions, predicted_end, "
+                "confidence, or any required field.\n"
+                f"{_BATCH_SCHEMA_RULES}"
+            ),
+            user_text=json.dumps(repair_payload, ensure_ascii=False, separators=(",", ":")),
+            observation=observation,
+        )
+        repaired.pop("done", None)
+        return BatchSpec.model_validate(repaired, strict=False)
 
 
 class ModelLobeA:
@@ -250,21 +336,47 @@ class ModelLobeA:
         self.client = client
 
     def plan_initial(self, task: str, observation: RuntimeObservation) -> BatchSpec | None:
-        raw = self.client.complete_json(system=_A_SYSTEM, user_text=_batch_prompt(task, observation), observation=observation)
+        raw = self.client.complete_json(
+            system=f"{_A_SYSTEM}\n{_BATCH_SCHEMA_RULES}",
+            user_text=_batch_prompt(
+                task,
+                observation,
+                output_schema=BatchSpec.model_json_schema(),
+            ),
+            observation=observation,
+        )
         if raw.get("done") is True:
             return None
-        raw.pop("done", None)
-        # JSON has arrays where the strict internal contract uses tuples.  The
-        # action fields and bounds are still validated by Pydantic; this only
-        # adapts the wire representation.
-        return BatchSpec.model_validate(raw, strict=False)
+        return _validate_batch_or_repair(
+            self.client,
+            raw,
+            task=task,
+            observation=observation,
+            active=None,
+            source_lobe="A",
+        )
 
     def predict_next(self, task: str, active_batch: BatchSpec, observation: RuntimeObservation) -> BatchSpec | None:
-        raw = self.client.complete_json(system=_A_SYSTEM, user_text=_batch_prompt(task, observation, active_batch), observation=observation)
+        raw = self.client.complete_json(
+            system=f"{_A_SYSTEM}\n{_BATCH_SCHEMA_RULES}",
+            user_text=_batch_prompt(
+                task,
+                observation,
+                active_batch,
+                output_schema=BatchSpec.model_json_schema(),
+            ),
+            observation=observation,
+        )
         if raw.get("done") is True:
             return None
-        raw.pop("done", None)
-        return BatchSpec.model_validate(raw, strict=False)
+        return _validate_batch_or_repair(
+            self.client,
+            raw,
+            task=task,
+            observation=observation,
+            active=active_batch,
+            source_lobe="A",
+        )
 
 
 class ModelSplitPlanner:
@@ -281,7 +393,12 @@ class ModelSplitPlanner:
     ) -> ParallelSplitPlan | None:
         raw = self.client.complete_json(
             system=_SPLIT_SYSTEM,
-            user_text=_split_prompt(task, observation_a, observation_b),
+            user_text=_split_prompt(
+                task,
+                observation_a,
+                observation_b,
+                output_schema=ParallelSplitPlan.model_json_schema(),
+            ),
             observation=observation_a,
         )
         if raw.get("done") is True or raw.get("parallelizable") is False:
@@ -309,6 +426,30 @@ class ModelLobeB:
         observation: RuntimeObservation,
     ) -> LobeDecision:
         raw = self.client.complete_json(system=system, user_text=user_text, observation=observation)
+        try:
+            decision = self._validate_decision(raw)
+        except ValidationError as first_error:
+            repair_payload = {
+                "invalid_response": raw,
+                "validation_error": str(first_error),
+                "output_schema": LobeDecision.model_json_schema(),
+                "instruction": "Return a complete LobeDecision. If approved is true, include a complete BatchSpec; otherwise use batch=null.",
+            }
+            repaired = self.client.complete_json(
+                system=(
+                    f"{system}\nRepair the invalid JSON response. Return only a complete "
+                    "LobeDecision matching the supplied schema. Every nested action "
+                    "must use `kind`, never `action_type`. Do not invent proof or "
+                    "action success."
+                ),
+                user_text=json.dumps(repair_payload, ensure_ascii=False, separators=(",", ":")),
+                observation=observation,
+            )
+            decision = self._validate_decision(repaired)
+        return decision
+
+    def _validate_decision(self, raw: dict[str, Any]) -> LobeDecision:
+        raw = dict(raw)
         core_raw = raw.pop("core_review", None)
         decision = LobeDecision.model_validate(raw, strict=False)
         if core_raw is None:
@@ -327,7 +468,13 @@ class ModelLobeB:
         system = f"{_B_SYSTEM}\nManual profile: {self.profile.value}. {_PROFILE_INSTRUCTIONS[self.profile]}"
         return self._decision_with_core(
             system=system,
-            user_text=_batch_prompt(task, observation, active_batch, profile=self.profile),
+            user_text=_batch_prompt(
+                task,
+                observation,
+                active_batch,
+                profile=self.profile,
+                output_schema=LobeDecision.model_json_schema(),
+            ),
             observation=observation,
         )
 
@@ -343,7 +490,12 @@ class ModelScreenLobeB(ModelLobeB):
     ) -> ScreenAssessment:
         raw = self.client.complete_json(
             system=_SCREEN_SYSTEM,
-            user_text=_screen_prompt(task, observation, active_batch),
+            user_text=_screen_prompt(
+                task,
+                observation,
+                active_batch,
+                output_schema=ScreenAssessment.model_json_schema(),
+            ),
             observation=observation,
         )
         return ScreenAssessment.model_validate(raw, strict=False)
@@ -368,6 +520,7 @@ class ModelScreenLobeB(ModelLobeB):
                 candidate=candidate,
                 assessment=assessment,
                 profile=self.profile,
+                output_schema=LobeDecision.model_json_schema(),
             ),
             observation=observation,
         )

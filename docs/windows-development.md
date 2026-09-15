@@ -1,6 +1,6 @@
 # Windows development
 
-The `compuse-agent` vertical slice uses a headed desktop adapter. Install the
+The `tasker-agent` vertical slice uses a headed desktop adapter. Install the
 optional dependencies on Windows with:
 
 ```powershell

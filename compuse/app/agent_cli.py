@@ -13,7 +13,7 @@ from compuse.app.desktop import DesktopAdapter, DesktopSafetyError
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="compuse-agent",
+        prog="tasker-agent",
         description="Run a guarded NeuralAgent-style dual-lobe desktop task.",
     )
     parser.add_argument("task", help="natural-language task for the computer-use model")
