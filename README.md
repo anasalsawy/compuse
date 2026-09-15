@@ -98,6 +98,29 @@ Replace the example URL, API URL, key, and model with your real values. The
 `desktop` extra installs Windows input dependencies; the `test` extra installs
 the test runner.
 
+## Automatic upgrades
+
+After this version is installed, starting `tasker` checks the `main` branch of
+the official repository. If a newer revision exists, Tasker downloads it into
+the existing project directory, preserves runtime files such as the SQLite
+journal, and restarts itself on the updated source. Git checkouts are updated
+with a fast-forward-only pull; extracted folders receive a safe source
+overlay. Update failures are printed and Tasker continues with the current
+code. Use `--no-auto-update` for one launch or set
+`TASKER_AUTO_UPDATE=0` to disable the check.
+
+If the current installation is too old to contain the updater, bootstrap it
+once without editing files or replacing the folder:
+
+```powershell
+$installer = Join-Path $env:TEMP "tasker-install-latest.ps1"
+curl.exe --noproxy "*" --fail --location `
+  "https://raw.githubusercontent.com/anasalsawy/compuse/main/install-tasker.ps1" `
+  --output $installer
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer `
+  -ProjectRoot "C:\Projects\tasker"
+```
+
 Use `--live` only after reviewing the task. Without it, the desktop adapter
 refuses mouse, keyboard, launch, file, and browser mutations.
 

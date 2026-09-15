@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tasker"
-version = "0.4.2"
+version = "0.4.3"
 description = "Tasker interactive NeuralAgent-style desktop computer-use runtime"
 readme = "README.md"
 requires-python = ">=3.11"

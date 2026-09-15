@@ -1,6 +1,8 @@
 import json
+import io
 import sys
 import types
+import zipfile
 import pytest
 from compuse.app.workflow import authorize, build_action, perform, run_demo
 from compuse.app.cli import main
@@ -38,6 +40,40 @@ def test_tasker_prompt_session_uses_prompt_toolkit_meta_dict(monkeypatch):
     assert "/help" in captured["words"]
     assert captured["meta_dict"]["/help"] == "show commands"
     assert "meta" not in captured
+
+
+def test_tasker_archive_update_overlays_source_and_keeps_runtime_files(tmp_path):
+    from compuse.app import updater
+
+    archive_bytes = io.BytesIO()
+    with zipfile.ZipFile(archive_bytes, "w") as archive:
+        archive.writestr("compuse-main/compuse/app/tasker_cli.py", "new code")
+        archive.writestr("compuse-main/pyproject.toml", "new metadata")
+
+    runtime_db = tmp_path / "desktop-web.db"
+    runtime_db.write_text("keep this", encoding="utf-8")
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    files = updater._stage_archive(archive_bytes.getvalue(), staging)
+    updater._install_staged(tmp_path, files, "a" * 40, staging)
+
+    assert (tmp_path / "compuse/app/tasker_cli.py").read_text(encoding="utf-8") == "new code"
+    assert (tmp_path / "pyproject.toml").read_text(encoding="utf-8") == "new metadata"
+    assert runtime_db.read_text(encoding="utf-8") == "keep this"
+    assert (tmp_path / updater.REVISION_MARKER).read_text(encoding="ascii").strip() == "a" * 40
+
+
+def test_tasker_update_check_skips_when_revision_marker_is_current(monkeypatch, tmp_path):
+    from compuse.app import updater
+
+    revision = "b" * 40
+    (tmp_path / updater.REVISION_MARKER).write_text(revision, encoding="ascii")
+    monkeypatch.setattr(updater, "remote_revision", lambda **_: revision)
+
+    result = updater.maybe_auto_update(root=tmp_path, restart=False)
+
+    assert result.state == "current"
+    assert result.revision == revision
 
 
 def test_demo_covers_full_lifecycle():

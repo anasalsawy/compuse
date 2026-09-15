@@ -21,6 +21,7 @@ from compuse.agent import (
 )
 from compuse.agent.llm import DynamicModelLobeB, ModelError, ModelLobeA, OpenAICompatibleClient
 from compuse.app.desktop import DesktopAdapter, DesktopSafetyError
+from compuse.app.updater import UpdateError, maybe_auto_update
 
 
 _COMMANDS = {
@@ -93,6 +94,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default=None, help="vision-capable model name")
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--trace", action="store_true", help="print live A/B/execution overlap events")
+    parser.add_argument(
+        "--no-auto-update",
+        action="store_true",
+        help="skip the startup update check for this launch",
+    )
     parser.add_argument(
         "--allow-launch",
         action="append",
@@ -446,8 +452,14 @@ def _config_from_args(args: argparse.Namespace) -> ShellConfig:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
+    launch_argv = tuple(sys.argv[1:] if argv is None else argv)
     try:
-        args = parser.parse_args(argv)
+        args = parser.parse_args(launch_argv)
+        if not args.no_auto_update:
+            try:
+                maybe_auto_update(argv=launch_argv)
+            except UpdateError as exc:
+                print(f"[Tasker] auto-update skipped: {exc}", file=sys.stderr)
         config = _config_from_args(args)
         shell = TaskerShell(config)
     except (ValueError, RuntimeError) as exc:
