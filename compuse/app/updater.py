@@ -45,6 +45,7 @@ class UpdateResult:
     state: str
     revision: str | None = None
     detail: str = ""
+    exit_code: int | None = None
 
 
 def source_root() -> Path:
@@ -267,5 +268,15 @@ def maybe_auto_update(
     environment[RESTART_ENV] = "1"
     command = [sys.executable, "-m", "compuse.app.tasker_cli", *argv]
     print(f"[Tasker] updated from {current or 'unknown'} to {latest}; restarting...")
-    os.execvpe(sys.executable, command, environment)
-    raise AssertionError("process replacement unexpectedly returned")
+    # subprocess receives an argv list and therefore preserves executable
+    # paths such as ``C:\\Program Files\\Python314\\python.exe`` on Windows.
+    try:
+        child = subprocess.run(
+            command,
+            cwd=str(project_root),
+            env=environment,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise UpdateError(f"updated successfully but restart failed: {exc}") from exc
+    return UpdateResult("restarted", revision=latest, exit_code=child.returncode)

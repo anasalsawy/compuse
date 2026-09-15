@@ -76,6 +76,18 @@ def test_tasker_update_check_skips_when_revision_marker_is_current(monkeypatch, 
     assert result.revision == revision
 
 
+def test_tasker_main_returns_after_successful_auto_restart(monkeypatch):
+    from compuse.app import tasker_cli, updater
+
+    monkeypatch.setattr(
+        tasker_cli,
+        "maybe_auto_update",
+        lambda **_: updater.UpdateResult("restarted", exit_code=0),
+    )
+
+    assert tasker_cli.main(["--no-banner"]) == 0
+
+
 def test_demo_covers_full_lifecycle():
     lines = run_demo()
     joined = "\n".join(lines)

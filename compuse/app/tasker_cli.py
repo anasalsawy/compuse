@@ -457,7 +457,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         args = parser.parse_args(launch_argv)
         if not args.no_auto_update:
             try:
-                maybe_auto_update(argv=launch_argv)
+                update = maybe_auto_update(argv=launch_argv)
+                if update.state == "restarted":
+                    return update.exit_code or 0
             except UpdateError as exc:
                 print(f"[Tasker] auto-update skipped: {exc}", file=sys.stderr)
         config = _config_from_args(args)
