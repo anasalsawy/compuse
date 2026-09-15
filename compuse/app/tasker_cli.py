@@ -278,7 +278,9 @@ class TaskerShell:
         }
         completer = WordCompleter(
             list(descriptions),
-            meta=descriptions,
+            # prompt-toolkit calls this argument ``meta_dict``.  ``meta``
+            # looks intuitive but is not accepted by WordCompleter.
+            meta_dict=descriptions,
             sentence=False,
             match_middle=False,
         )

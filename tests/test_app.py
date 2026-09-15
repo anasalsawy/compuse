@@ -1,10 +1,43 @@
 import json
 import sys
+import types
 import pytest
 from compuse.app.workflow import authorize, build_action, perform, run_demo
 from compuse.app.cli import main
 from compuse.app.executor import execute, ExecutorError
 from compuse.app.sequence import load_steps, run_steps
+
+
+def test_tasker_prompt_session_uses_prompt_toolkit_meta_dict(monkeypatch):
+    from compuse.app.tasker_cli import TaskerShell
+
+    captured = {}
+
+    class FakeWordCompleter:
+        def __init__(self, words, **kwargs):
+            captured["words"] = words
+            captured.update(kwargs)
+
+    class FakePromptSession:
+        def __init__(self, *, completer):
+            self.completer = completer
+
+    fake_prompt_toolkit = types.ModuleType("prompt_toolkit")
+    fake_prompt_toolkit.PromptSession = FakePromptSession
+    fake_completion = types.ModuleType("prompt_toolkit.completion")
+    fake_completion.WordCompleter = FakeWordCompleter
+    monkeypatch.setitem(sys.modules, "prompt_toolkit", fake_prompt_toolkit)
+    monkeypatch.setitem(sys.modules, "prompt_toolkit.completion", fake_completion)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+
+    shell = TaskerShell.__new__(TaskerShell)
+    shell.input_fn = input
+    session = shell._prompt_session()
+
+    assert isinstance(session, FakePromptSession)
+    assert "/help" in captured["words"]
+    assert captured["meta_dict"]["/help"] == "show commands"
+    assert "meta" not in captured
 
 
 def test_demo_covers_full_lifecycle():
